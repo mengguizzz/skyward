@@ -4,11 +4,25 @@ use skyward_bootimg::{BootImage, Ramdisk};
 use std::{env, fs, path::Path};
 #[path = "../../../crates/skyward-pack/src/avb.rs"]
 mod avb;
+mod overlay;
+use overlay::{digest, Record};
 
-fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+fn previous_overlay(rd: &Ramdisk) -> Result<std::collections::BTreeMap<String, Record>> {
+    let Some(stamp) = rd.find(overlay::MANIFEST) else { return Ok(Default::default()) };
+    ensure!(stamp.mode == 0o100644 && stamp.uid == 0 && stamp.gid == 0, "invalid overlay stamp metadata");
+    let records = overlay::parse_manifest(std::str::from_utf8(&stamp.data)?)?;
+    for (name, record) in &records {
+        let entry = rd.find(name).with_context(|| format!("previous overlay entry missing: {name}"))?;
+        // Properties can be changed by other installers; merge their unrelated keys below.
+        ensure!(name == "prop.default" || Record::of(entry) == *record,
+            "previous overlay entry changed: {name}");
+    }
+    Ok(records)
+}
 
-fn recovery_properties(original: &[u8]) -> Result<Vec<u8>> {
+fn recovery_properties(original: &[u8], desired: &[u8]) -> Result<Vec<u8>> {
     let text = std::str::from_utf8(original).context("boot properties are not UTF-8")?;
+    let desired = std::str::from_utf8(desired).context("overlay properties are not UTF-8")?;
     let replaced = [
         "ro.build.version.release", "ro.build.version.security_patch", "ro.vendor.build.security_patch",
         "ro.secure", "ro.adb.secure", "ro.debuggable", "ro.ota.allow_downgrade", "ro.skyward.binder.header",
@@ -18,8 +32,60 @@ fn recovery_properties(original: &[u8]) -> Result<Vec<u8>> {
     }).collect();
     while lines.last().is_some_and(|line| line.is_empty()) { lines.pop(); }
     let mut result = lines.join("\n");
-    result.push_str("\n\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\nro.skyward.binder.header=SYST\n");
+    result.push_str("\n\n");
+    for line in desired.lines() {
+        if line.split_once('=').is_some_and(|(key, _)| replaced[3..].contains(&key.trim())) {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
     Ok(result.into_bytes())
+}
+
+fn apply_overlay(rd: &mut Ramdisk, mut overlay: Ramdisk, expected: &str) -> Result<()> {
+    ensure!(overlay.entries.len() == expected.lines().count(), "overlay manifest mismatch");
+    ensure!(overlay.find("system/bin/init").is_none(), "overlay must retain first-stage init");
+    let previous = previous_overlay(rd)?;
+    let legacy = overlay::parse_manifest(include_str!("legacy-overlay.sha256"))?;
+    for name in previous.keys() {
+        ensure!(overlay.find(name).is_some(), "new overlay omits previously managed file: {name}");
+    }
+    for entry in &mut overlay.entries {
+        let line = expected.lines().find(|line| line.split_once(' ').is_some_and(|(_, name)| name == entry.name))
+            .context("overlay target missing")?;
+        let (old_hash, _) = line.split_once(' ').unwrap();
+        match rd.find(&entry.name) {
+            Some(old) => {
+                let record = Record::of(old);
+                let known = digest(&old.data) == old_hash ||
+                    Record::of(entry) == record ||
+                    previous.get(&entry.name) == Some(&record) ||
+                    legacy.get(&entry.name) == Some(&record) ||
+                    (entry.name == overlay::MANIFEST && !previous.is_empty());
+                if entry.name == "prop.default" {
+                    entry.data = recovery_properties(&old.data, &entry.data)?;
+                    entry.mode = old.mode;
+                    entry.uid = old.uid;
+                    entry.gid = old.gid;
+                } else {
+                    ensure!(known, "conflicting ramdisk file: {}", entry.name);
+                }
+            }
+            None => ensure!(old_hash == "-", "required ramdisk file missing: {}", entry.name),
+        }
+    }
+    let stamp = overlay::manifest(&overlay.entries);
+    let stamp_entry = overlay.entries.iter_mut().find(|e| e.name == overlay::MANIFEST)
+        .context("generated overlay stamp missing")?;
+    stamp_entry.data = stamp.into_bytes();
+    for entry in overlay.entries {
+        if let Some(at) = rd.entries.iter().position(|e| e.name == entry.name) {
+            rd.entries[at] = entry;
+        } else {
+            rd.entries.push(entry);
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -36,35 +102,9 @@ fn main() -> Result<()> {
     let old_line = std::str::from_utf8(&original[44..1580])?.split('\0').next().unwrap();
     ensure!(!old_line.split_ascii_whitespace().any(|a| a.starts_with("twrpfastboot=")),
         "temporary forced-recovery boot cannot be installed; restore normal TWRP boot first");
-    let mut overlay = Ramdisk::decode(&fs::read(data.join("overlay.gz"))?)?;
+    let overlay = Ramdisk::decode(&fs::read(data.join("overlay.gz"))?)?;
     let expected = fs::read_to_string(data.join("original-targets.txt"))?;
-    ensure!(overlay.entries.len() == expected.lines().count(), "overlay manifest mismatch");
-    for entry in &mut overlay.entries {
-        let line = expected.lines().find(|line| line.split_once(' ').is_some_and(|(_, name)| name == entry.name))
-            .context("overlay target missing")?;
-        let (old_hash, _) = line.split_once(' ').unwrap();
-        match rd.find(&entry.name) {
-            Some(old) => {
-                let known = digest(&old.data) == old_hash || (old.data == entry.data && old.mode == entry.mode);
-                if !known && entry.name == "prop.default" {
-                    entry.data = recovery_properties(&old.data)?;
-                    entry.mode = old.mode;
-                    entry.uid = old.uid;
-                    entry.gid = old.gid;
-                } else {
-                    ensure!(known, "conflicting ramdisk file: {}", entry.name);
-                }
-            }
-            None => ensure!(old_hash == "-", "required ramdisk file missing: {}", entry.name),
-        }
-    }
-    for entry in overlay.entries {
-        if let Some(at) = rd.entries.iter().position(|e| e.name == entry.name) {
-            rd.entries[at] = entry;
-        } else {
-            rd.entries.push(entry);
-        }
-    }
+    apply_overlay(&mut rd, overlay, &expected)?;
     let mut tokens: Vec<_> = old_line.split_ascii_whitespace().collect();
     ensure!(!tokens.iter().any(|t| t.starts_with("cnss2.disable_nv_mac=") && *t != "cnss2.disable_nv_mac=1"),
         "conflicting WLAN kernel parameter");
@@ -102,12 +142,63 @@ mod tests {
     #[test]
     fn custom_base_properties_survive_and_recovery_overrides_are_idempotent() {
         let source = b"ro.product.device=pipa\nro.custom.kernel=test\nro.build.version.release=14\nro.secure=1\n";
-        let once = recovery_properties(source).unwrap();
+        let desired = b"ro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\nro.skyward.binder.header=SYST\n";
+        let once = recovery_properties(source, desired).unwrap();
         let text = std::str::from_utf8(&once).unwrap();
         assert!(text.contains("ro.product.device=pipa\nro.custom.kernel=test\n"));
         assert!(!text.contains("ro.build.version.release="));
         assert!(!text.contains("ro.secure=1"));
         assert!(text.contains("ro.secure=0\n"));
-        assert_eq!(once, recovery_properties(&once).unwrap());
+        assert_eq!(once, recovery_properties(&once, desired).unwrap());
+    }
+
+    fn fixture() -> Ramdisk {
+        let mut rd = Ramdisk { entries: Vec::new() };
+        rd.add("system/bin/init", 0o755, b"original init".to_vec()).unwrap();
+        rd.add("system/bin/recovery", 0o755, b"original recovery".to_vec()).unwrap();
+        rd.add("prop.default", 0o644, b"ro.custom.kernel=yes\nro.secure=1\n".to_vec()).unwrap();
+        rd
+    }
+
+    fn update(base: &Ramdisk, version: &[u8]) -> (Ramdisk, String) {
+        let mut overlay = Ramdisk { entries: Vec::new() };
+        overlay.add("system/bin/recovery", 0o755, version.to_vec()).unwrap();
+        overlay.add("skyward/device.toml", 0o644, version.to_vec()).unwrap();
+        overlay.add("prop.default", 0o644, b"ro.secure=0\nro.skyward.binder.header=SYST\n".to_vec()).unwrap();
+        overlay.add(overlay::MANIFEST, 0o644, overlay::manifest(&overlay.entries).into_bytes()).unwrap();
+        let expected = overlay.entries.iter().map(|e| {
+            format!("{} {}\n", base.find(&e.name).map(|old| digest(&old.data)).unwrap_or("-".into()), e.name)
+        }).collect();
+        (overlay, expected)
+    }
+
+    #[test]
+    fn fresh_repeat_and_changed_source_upgrade_keep_init_and_custom_properties() {
+        let base = fixture();
+        let mut installed = fixture();
+        for version in [b"build one".as_slice(), b"build one", b"build two"] {
+            let (overlay, expected) = update(&base, version);
+            apply_overlay(&mut installed, overlay, &expected).unwrap();
+            assert_eq!(installed.find("system/bin/recovery").unwrap().data, version);
+            assert_eq!(installed.find("skyward/device.toml").unwrap().data, version);
+            assert_eq!(installed.find("system/bin/init").unwrap().data, b"original init");
+            assert!(std::str::from_utf8(&installed.find("prop.default").unwrap().data).unwrap().contains("ro.custom.kernel=yes\n"));
+            previous_overlay(&installed).unwrap();
+        }
+    }
+
+    #[test]
+    fn unknown_changes_and_unstamped_target_collisions_are_refused() {
+        let base = fixture();
+        let mut installed = fixture();
+        let (overlay, expected) = update(&base, b"build one");
+        apply_overlay(&mut installed, overlay, &expected).unwrap();
+        installed.replace("skyward/device.toml", b"unknown change".to_vec()).unwrap();
+        let (overlay, expected) = update(&base, b"build two");
+        assert!(apply_overlay(&mut installed, overlay, &expected).is_err());
+        let mut other = fixture();
+        other.add("skyward/device.toml", 0o644, b"third-party file".to_vec()).unwrap();
+        let (overlay, expected) = update(&base, b"build two");
+        assert!(apply_overlay(&mut other, overlay, &expected).is_err());
     }
 }

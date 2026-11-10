@@ -22,3 +22,7 @@ path = "src/patcher.rs"
 [[bin]]
 name = "cust-readonly"
 path = "src/cust_readonly.rs"
+
+[[bin]]
+name = "make-installer-data"
+path = "src/installer_data.rs"

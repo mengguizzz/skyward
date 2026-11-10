@@ -6,9 +6,13 @@ import subprocess
 import sys
 import zipfile
 
+sys.dont_write_bytecode = True
+
+from routing import verify_patch, verify_routing
+
 REPO = pathlib.Path(__file__).resolve().parents[2]
 LOCK = json.loads((REPO / "tools/pipa-ci/inputs.lock.json").read_text())
-ROUTING_NAMES = {"overlay.gz", "original-targets.txt", "init.sha256", "kernels.sha256"}
+ROUTING_NAMES = {"overlay.gz", "original-targets.txt"}
 
 
 def digest(path):
@@ -16,24 +20,23 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def validate(base, routing):
+def validate(base):
     if base.stat().st_size != LOCK["base"]["size"] or digest(base) != LOCK["base"]["sha256"]:
         raise SystemExit("Base boot differs from the tested boot-fbboot.img")
-    if digest(routing) != LOCK["routing"]["sha256"]:
-        raise SystemExit("Frozen boot routing archive hash mismatch")
-    with zipfile.ZipFile(routing) as archive:
-        if set(archive.namelist()) != ROUTING_NAMES or len(archive.namelist()) != len(ROUTING_NAMES):
-            raise SystemExit("Unexpected frozen routing files")
-        if archive.testzip() is not None:
-            raise SystemExit("Corrupt routing archive")
-        for name, expected in LOCK["routing"]["files"].items():
-            if hashlib.sha256(archive.read(name)).hexdigest() != expected:
-                raise SystemExit(f"Frozen routing file hash mismatch: {name}")
-    print("Input images and routing archive validated.")
+    print("Base boot validated.")
 
 
 def package(base, routing, target, out):
-    validate(base, routing)
+    validate(base)
+    loader = target / "pipa-cust-installer/aarch64-linux-android/release/recovery-loader"
+    routing_report = verify_routing(REPO, base, out / "skyward-pipa-boot.img", loader, routing)
+    binary = target / "aarch64-linux-android/release/skyward"
+    if routing_report["fallback_sha256"] != digest(binary):
+        raise SystemExit("Boot fallback differs from the current cust payload")
+    routing_report["offline_patch_checks"] = verify_patch(
+        REPO, base, routing, target / "release/boot-patcher", out
+    )
+    (out / "routing-verification.json").write_text(json.dumps(routing_report, indent=2) + "\n")
     stage = out / "installer-staging"
     if stage.exists():
         raise SystemExit("installer-staging already exists; use a fresh output directory")
@@ -41,12 +44,12 @@ def package(base, routing, target, out):
     (stage / "data").mkdir()
     (stage / "tools").mkdir()
     (stage / "payload").mkdir()
-    with zipfile.ZipFile(routing) as archive:
-        for name in sorted(ROUTING_NAMES):
-            (stage / "data" / name).write_bytes(archive.read(name))
+    if {p.name for p in routing.iterdir()} != ROUTING_NAMES:
+        raise SystemExit("Unexpected generated routing files")
+    for name in sorted(ROUTING_NAMES):
+        shutil.copyfile(routing / name, stage / "data" / name)
     for name in ("boot-patcher", "recovery-loader", "cust-readonly"):
         shutil.copyfile(target / "pipa-cust-installer/aarch64-linux-android/release" / name, stage / "tools" / name)
-    binary = target / "aarch64-linux-android/release/skyward"
     shutil.copyfile(binary, stage / "payload/recovery")
     (stage / "payload/manifest.txt").write_text("pipa-v8-userspace-prototype-1\n" + digest(binary) + "\n")
     shutil.copyfile(REPO / "LICENSE", stage / "LICENSE")
@@ -82,19 +85,21 @@ def package(base, routing, target, out):
         "inputs": LOCK,
         "payload_sha256": digest(binary),
         "hardware_tested": False,
-        "boot_fallback": "historical-v8",
+        "boot_fallback": "current-source-build",
+        "routing": routing_report,
     }, indent=2) + "\n")
     (out / "SHA256SUMS").write_text("\n".join(
         f"{digest(out / name)}  {name}"
-        for name in ("skyward-pipa-boot.img", result.name, "verification.json", "build-info.json")
+        for name in ("skyward-pipa-boot.img", result.name, "verification.json",
+                     "routing-verification.json", "build-info.json")
     ) + "\n")
     print(f"Installer ZIP verified: {len(lines)} members plus SHA256SUMS")
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "validate" and len(sys.argv) == 4:
-        validate(*map(pathlib.Path, sys.argv[2:]))
-    elif sys.argv[1] == "package" and len(sys.argv) == 6:
+    if len(sys.argv) == 3 and sys.argv[1] == "validate":
+        validate(pathlib.Path(sys.argv[2]))
+    elif len(sys.argv) == 6 and sys.argv[1] == "package":
         package(*map(pathlib.Path, sys.argv[2:]))
     else:
-        raise SystemExit("Usage: package.py validate BASE ROUTING | package BASE ROUTING TARGET OUT")
+        raise SystemExit("Usage: package.py validate BASE | package BASE ROUTING_DATA TARGET OUT")

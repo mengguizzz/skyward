@@ -111,7 +111,7 @@ fn main() {
         }
         Err(error) => log(&format!("external payload unavailable: {error}")),
     }
-    log("falling back to built-in v8 recovery");
+    log("falling back to recovery built with this installer");
     let error = Command::new("/system/bin/recovery").arg0("recovery").exec();
     log(&format!("built-in exec failed: {error}"));
     std::process::exit(1);

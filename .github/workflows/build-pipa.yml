@@ -43,12 +43,11 @@ jobs:
         run: |
           mkdir -p inputs
           gzip --decompress --stdout tools/pipa-ci/inputs/boot-fbboot.img.gz > inputs/boot-fbboot.img
-          cp tools/pipa-ci/inputs/pipa-routing.zip inputs/pipa-routing.zip
-          python3 tools/pipa-ci/package.py validate inputs/boot-fbboot.img inputs/pipa-routing.zip
+          python3 tools/pipa-ci/package.py validate inputs/boot-fbboot.img
       - name: Build and verify pipa outputs
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-        run: bash tools/pipa-ci/build.sh inputs/boot-fbboot.img inputs/pipa-routing.zip out/pipa
+        run: bash tools/pipa-ci/build.sh inputs/boot-fbboot.img out/pipa
       - uses: actions/upload-artifact@v7
         with:
           name: skyward-pipa-${{ github.sha }}
@@ -57,6 +56,7 @@ jobs:
             out/pipa/skyward-pipa-cust-installer.zip
             out/pipa/SHA256SUMS
             out/pipa/verification.json
+            out/pipa/routing-verification.json
             out/pipa/build-info.json
           if-no-files-found: error
           retention-days: 14
@@ -105,5 +105,6 @@ jobs:
             out/pipa/skyward-pipa-boot.img \
             out/pipa/SHA256SUMS \
             out/pipa/verification.json \
+            out/pipa/routing-verification.json \
             out/pipa/build-info.json \
             out/pipa/RELEASE-NOTES.md

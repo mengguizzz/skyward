@@ -1,0 +1,5 @@
+tools/pipa-ci/*.sh text eol=lf
+tools/pipa-cust-installer/package/*.sh text eol=lf
+tools/pipa-cust-installer/package/META-INF/com/google/android/update-binary text eol=lf
+tools/pipa-cust-installer/src/*.sha256 text eol=lf
+tools/pipa-ci/inputs/*.gz binary
