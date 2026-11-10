@@ -222,7 +222,7 @@ pub fn installed_props(slot: Slot) -> Result<HashMap<String, String>> {
         };
         for f in files {
             let path = m.mount_point.join(f);
-            match fs::metadata(&path) {
+            match skyward_block::mount::path_metadata(&path) {
                 Err(e) if e.kind() == ErrorKind::NotFound => continue,
                 Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
                 Ok(_) => {}
@@ -327,8 +327,8 @@ fn storage() -> Result<Storage> {
 /// its parent.
 fn is_mountpoint(path: &Path) -> Result<bool> {
     let parent = path.parent().ok_or_else(|| anyhow!("{} has no parent", path.display()))?;
-    let here = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-    let up = fs::metadata(parent).with_context(|| format!("stat {}", parent.display()))?;
+    let here = skyward_block::mount::path_metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let up = skyward_block::mount::path_metadata(parent).with_context(|| format!("stat {}", parent.display()))?;
     Ok(here.dev() != up.dev())
 }
 

@@ -130,3 +130,50 @@ skyward-block 的 35 项和 skyward-vab 的 16 项单元测试通过。
 后续应在新的完整启动中确认上述阶段，再处理 vendor 服务退出/从 RAM 运行
 及残余引用。无需为了应用本次源码改动修改内核，但也不能保证所有保留的
 第三方内核及任意 updater 都可通过用户空间绕过。
+
+## 冷启动复测：属性读取还会重新引入路径 stat
+
+安装 `72996a3` 对应构建后，设备运行 payload 的 SHA-256 是
+`c0758991bda3ceb9d40e0aed041f5ed52e874f046a2bbb3c2eee46cd4af5d122`。
+启动别名标记存在，super 挂载源也已是 alias，persist 没再报告卸载失败。
+但安装 RE404.zip 时仍在 updater 启动前失败：
+
+```text
+[109.821820] released cnss private namespace slot mounts; private RAM data retained
+[109.824886] install: Failed(Error("move off the installed system: unmount /odm: Device or resource busy (os error 16)"))
+```
+
+挂载页面也足以触发同类问题，无需刷真实包。页面的 `read_mounts()` 会调用
+`installed_props()`，启动阶段同样调用它。旧实现先对每个 build.prop 做
+`fs::metadata`，随后 rsproperties 0.6.0 在解析文件前调用 canonicalize；
+设备上的 Bionic realpath 也会触发路径 stat。
+
+在同一设备单独运行旧、新 recovery 的只读 `info` 子命令，并用诊断
+LD_PRELOAD 记录属性查询：
+
+- 旧程序对 `/odm/etc/build.prop` 有两次成功的路径 stat，其他已有的属性
+  文件也相同。
+- 只改显式 metadata 后仍有一次，证实不能漏掉解析库内的 canonicalize。
+- 完整改动后属性读取成功，日志中这些 super 属性路径不再出现路径 stat。
+  此日志记录的是包装到的 libc 调用，不宣称覆盖任意程序的直接系统调用。
+
+本轮补充修改：
+
+1. `skyward-block::mount::path_metadata` 在 Android 使用 O_PATH 打开路径后
+   fstat，随后关闭描述符；保留跟随符号链接的语义和不要求文件读取权限的行为。
+2. installed_props、存储挂载检测、进程占用检测及 services::pin 的属性查询
+   改用这个接口。
+3. 根 Cargo.toml 通过 `[patch.crates-io]` 使用 `vendor/rsproperties` 中固定的
+   0.6.0。保留其 LICENSE、解析器、import 展开、覆盖顺序和循环/预算限制。
+   Android 属性文件路径改为先打开，再读取 `/proc/self/fd/<fd>`；其他平台不变。
+   Cargo.lock 同步更新，CI 仍使用 `--locked`。
+4. 诊断 example 增加属性文件检查、真实解析器读取和进程占用扫描。
+
+设备上新的独立只读 odm 映射测试连续两次通过，解析出 23 个属性，
+普通卸载成功、临时 DM 删除成功，原 odm 和其他 DM 保留。
+新 recovery 的 Android release 编译通过，block/vab/info 共 58 项测试通过。
+
+这些测试不替代完整 recovery 冷启动和挂载页面测试。当前运行进程及旧挂载中
+已经泄漏的引用不会因把新二进制推到 /tmp 而消失，必须用新构建重启复测。
+vendor 服务和 pin 的真实文件映射仍未在本轮迁移到独立 RAM，不能据此承诺
+vendor DM 可删除或完整 ROM 已可刷入。

@@ -48,6 +48,20 @@ pub struct Visible {
     pub filesystem: String,
 }
 
+/// Follow a path without issuing path-stat, which leaks mount references
+/// on some Android recovery kernels. O_PATH requires no file read access.
+pub fn path_metadata(path: &std::path::Path) -> std::io::Result<std::fs::Metadata> {
+    #[cfg(target_os = "android")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true)
+            .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+            .open(path)?.metadata()
+    }
+    #[cfg(not(target_os = "android"))]
+    std::fs::metadata(path)
+}
+
 #[cfg(target_os = "android")]
 mod sys {
     use super::{Visible, FILESYSTEMS};
@@ -421,7 +435,7 @@ mod sys {
     /// The device of the filesystem `path` is on, following it if it is a
     /// link; `None` when it went away.
     fn device_of(path: &Path) -> Result<Option<(u32, u32)>> {
-        match fs::metadata(path) {
+        match super::path_metadata(path) {
             Ok(m) => {
                 let dev = m.dev() as libc::dev_t;
                 Ok(Some((libc::major(dev) as u32, libc::minor(dev) as u32)))

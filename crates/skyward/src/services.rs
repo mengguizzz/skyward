@@ -301,7 +301,7 @@ pub fn pin(services: &[Service], mounted: &[Mounted]) -> Result<Vec<PathBuf>> {
     let mut busy: Vec<PathBuf> = Vec::new();
     for file in files {
         let Some(m) = mounted.iter().find(|m| file.starts_with(&m.mount_point)) else { continue };
-        if !fs::metadata(&file).with_context(|| format!("stat {}", file.display()))?.is_file() {
+        if !skyward_block::mount::path_metadata(&file).with_context(|| format!("stat {}", file.display()))?.is_file() {
             continue;
         }
         lock(&file)?;

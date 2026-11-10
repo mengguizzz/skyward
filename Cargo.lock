@@ -1948,8 +1948,6 @@ dependencies = [
 [[package]]
 name = "rsproperties"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e92cdbbe82223006ba7f16e6178dd9b24fbb967d000a096e8dc4129560d7ab41"
 dependencies = [
  "log",
  "pretty-hex",
@@ -2245,6 +2243,7 @@ dependencies = [
  "evdev",
  "libc",
  "procfs",
+ "rsproperties",
  "skyward-backup",
  "skyward-binder",
  "skyward-block",

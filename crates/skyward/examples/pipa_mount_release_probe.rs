@@ -57,6 +57,37 @@ fn main() -> anyhow::Result<()> {
         // File::metadata uses fstat, avoiding the independently reproduced
         // path-stat reference leak. Do not call path.is_dir() here.
         ensure!(File::open(&point)?.metadata()?.is_dir(), "not a directory");
+        ensure!(mount::path_metadata(&point)?.is_dir(), "path metadata lost directory type");
+        // installed_props checks this path on every mount-page refresh.
+        // Exercise that check on our independent view of the same odm.
+        let properties = point.join("etc/build.prop");
+        match mount::path_metadata(&properties) {
+            Ok(metadata) => {
+                ensure!(metadata.is_file(), "build.prop is not a file");
+                let mut props = std::collections::HashMap::new();
+                rsproperties::load_properties_from_file(&properties, None, "u:r:init:s0", &mut props)?;
+                println!("Parsed {} properties using the patched property parser", props.len());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        // The mount page also scans every process's descriptors and cwd.
+        let _ = mount::holders()?;
+        let fixtures = tempfile::Builder::new().prefix("pipa-props-").tempdir_in("/tmp")?;
+        let base = fixtures.path().join("base.prop");
+        let main = fixtures.path().join("main.prop");
+        let alias = fixtures.path().join("alias.prop");
+        fs::write(&base, "probe.value=base\n")?;
+        fs::write(&main, format!(
+            "probe.base={}\nimport ${{probe.base}}\nprobe.value=override\nimport {}\n",
+            base.display(), alias.display()
+        ))?;
+        std::os::unix::fs::symlink(&main, &alias)?;
+        let mut props = std::collections::HashMap::new();
+        rsproperties::load_properties_from_file(&main, None, "u:r:init:s0", &mut props)?;
+        ensure!(props.get("probe.value").map(String::as_str) == Some("override"),
+            "property import, last-wins override or symlink cycle handling changed");
+        println!("PASS: property imports, overrides and symlink cycles");
         let count = fs::read_dir(&point)?.collect::<Result<Vec<_>, _>>()?.len();
         println!("Read {count} directory entries without path-stat");
         mount::umount(&point)?;
