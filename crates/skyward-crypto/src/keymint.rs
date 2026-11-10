@@ -65,34 +65,6 @@ enum Value<'a> {
     Blob(&'a [u8]),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use skyward_binder::parcel::Reader;
-
-    #[test]
-    fn gcm_begin_parameters_do_not_repeat_the_separate_purpose_argument() {
-        for app_id in [&[][..], &[9, 8][..]] {
-            let mut parcel = Parcel::default();
-            gcm_params(&mut parcel, app_id, &[7; NONCE_BYTES]);
-            let mut read = Reader::new(parcel.bytes());
-            let count = read.i32().unwrap();
-            assert_eq!(count, if app_id.is_empty() { 4 } else { 5 });
-            let mut tags = Vec::new();
-            for _ in 0..count {
-                let end = read.structure().unwrap();
-                tags.push(read.i32().unwrap());
-                read.go(end).unwrap();
-            }
-            assert_eq!(&tags[..3], &[TAG_BLOCK_MODE, TAG_PADDING, TAG_MAC_LENGTH]);
-            assert_eq!(tags.last(), Some(&TAG_NONCE));
-            assert_eq!(tags.contains(&TAG_APPLICATION_ID), !app_id.is_empty());
-            assert!(!tags.contains(&536_870_913), "purpose is an argument of begin, not an operation parameter");
-            assert_eq!(read.here(), parcel.bytes().len());
-        }
-    }
-}
-
 fn parameter(p: &mut Parcel, tag: i32, value: Value) {
     // Each parameter is a structure of its own: it says it is there, then
     // how long it is, so the far side can step over what it does not know.
@@ -374,5 +346,33 @@ impl<'a> KeyMint<'a> {
     pub fn usable(&self, key_blob: &[u8], app_id: &[u8]) -> Result<()> {
         let operation = self.begin(key_blob, app_id, &[0; NONCE_BYTES], None)?;
         self.abort(&operation)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skyward_binder::parcel::Reader;
+
+    #[test]
+    fn gcm_begin_parameters_do_not_repeat_the_separate_purpose_argument() {
+        for app_id in [&[][..], &[9, 8][..]] {
+            let mut parcel = Parcel::default();
+            gcm_params(&mut parcel, app_id, &[7; NONCE_BYTES]);
+            let mut read = Reader::new(parcel.bytes());
+            let count = read.i32().unwrap();
+            assert_eq!(count, if app_id.is_empty() { 4 } else { 5 });
+            let mut tags = Vec::new();
+            for _ in 0..count {
+                let end = read.structure().unwrap();
+                tags.push(read.i32().unwrap());
+                read.go(end).unwrap();
+            }
+            assert_eq!(&tags[..3], &[TAG_BLOCK_MODE, TAG_PADDING, TAG_MAC_LENGTH]);
+            assert_eq!(tags.last(), Some(&TAG_NONCE));
+            assert_eq!(tags.contains(&TAG_APPLICATION_ID), !app_id.is_empty());
+            assert!(!tags.contains(&536_870_913), "purpose is an argument of begin, not an operation parameter");
+            assert_eq!(read.here(), parcel.bytes().len());
+        }
     }
 }

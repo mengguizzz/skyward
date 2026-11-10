@@ -1,6 +1,8 @@
+#[cfg(target_os = "android")]
 #[path = "../src/private_data.rs"]
 mod private_data;
 
+#[cfg(target_os = "android")]
 fn main() -> std::io::Result<()> {
     let mounts = std::fs::read_to_string("/proc/self/mountinfo")?;
     let devices: Vec<String> = mounts.lines().filter_map(|s| {
@@ -20,4 +22,9 @@ fn main() -> std::io::Result<()> {
     println!("private data: {data}");
     println!("private socket directory write succeeded");
     Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn main() {
+    eprintln!("This diagnostic requires Android.");
 }
