@@ -87,7 +87,6 @@ jobs:
             printf '\n## 构建信息\n\n'
             printf -- '- 源码提交：`%s`\n' "$RELEASE_COMMIT"
             printf -- '- 构建分支：`%s`\n' "$RELEASE_BRANCH"
-            printf -- '- 构建日志：%s\n' "$RELEASE_RUN_URL"
             printf -- '- 校验值与输入基底详情见随附的 `SHA256SUMS` 和 `build-info.json`。\n'
           } >> out/pipa/RELEASE-NOTES.md
       - name: Publish release
