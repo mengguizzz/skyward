@@ -58,6 +58,11 @@ fn table() -> Result<Vec<Entry>> {
         let text = match std::fs::read_to_string(file) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            // An unmounted odm can expose the ramdisk compatibility-link
+            // cycle through /vendor/odm. Do not hide loops on mounted data.
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP)
+                && !crate::mount::is_mount_point(
+                    Path::new(file).ancestors().nth(2).expect("absolute fstab path"))? => continue,
             Err(e) => return Err(e).with_context(|| format!("read {file}")),
         };
         out.extend(entries(&text));

@@ -312,15 +312,25 @@ pub fn pin(services: &[Service], mounted: &[Mounted]) -> Result<Vec<PathBuf>> {
     }
     // Private cnss namespaces inherit every slot mount, including ones
     // whose files cnss never opens. They must release those references too.
-    let points: Vec<_> = mounted.iter().map(|m| m.mount_point.clone()).collect();
+    let slot = skyward_vab::current_slot()?.context("no booted slot")?;
+    let points: Vec<_> = skyward_vab::slot_bases(slot)?.iter()
+        .map(|base| skyward_vab::mount_point(base)).collect();
+    release_private_mounts(services, &points)?;
+    Ok(busy)
+}
+
+/// Drop only the selected inherited views, leaving cnss's private userdata
+/// and every other mount in that namespace in place.
+pub fn release_private_mounts(services: &[Service], points: &[PathBuf]) -> Result<()> {
     for s in services.iter().filter(|s| needs_private_data(s)) {
         if let Some(pid) = running(&s.path) {
-            private_data::release_slot_mounts(pid, &points)
+            private_data::release_slot_mounts(pid, points)
                 .context("release inherited slot mounts in cnss namespace")?;
-            let _ = skyward_sys::kmsg("released cnss private namespace slot mounts; private RAM data retained");
+            let _ = skyward_sys::kmsg(&format!(
+                "released cnss private namespace mounts {:?}; private RAM data retained", points));
         }
     }
-    Ok(busy)
+    Ok(())
 }
 
 /// Map `path` whole and lock the mapping: its pages then stay in memory

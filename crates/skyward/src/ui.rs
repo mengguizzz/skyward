@@ -2572,13 +2572,19 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::Mount(base) => {
                         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
                         if let Err(e) = skyward_vab::mount_one(slot, &base) {
+                            let _ = skyward_sys::kmsg(&format!("mount {base} failed: {e:#}"));
                             app.mount_failed(MountFailure { mounting: true, base, detail: format!("{e:#}") });
                         }
                         app.set_mounts(mounts());
                     }
                     Effect::Unmount(base) => {
                         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
-                        if let Err(e) = skyward_vab::unmount_one(slot, &base) {
+                        let unmount = || -> Result<()> {
+                            services::release_private_mounts(&cfg.services, &[skyward_vab::mount_point(&base)])?;
+                            skyward_vab::unmount_one(slot, &base)
+                        };
+                        if let Err(e) = unmount() {
+                            let _ = skyward_sys::kmsg(&format!("unmount {base} failed: {e:#}"));
                             app.mount_failed(MountFailure { mounting: false, base, detail: format!("{e:#}") });
                         }
                         app.set_mounts(mounts());

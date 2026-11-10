@@ -177,3 +177,60 @@ LD_PRELOAD 记录属性查询：
 已经泄漏的引用不会因把新二进制推到 /tmp 而消失，必须用新构建重启复测。
 vendor 服务和 pin 的真实文件映射仍未在本轮迁移到独立 RAM，不能据此承诺
 vendor DM 可删除或完整 ROM 已可刷入。
+
+## d6cefa3 复测：挂载页面漏清理私有命名空间
+
+这次运行 payload 的 SHA-256 是
+`43cde3ca8d7866655061c21a7ae9c50a14aacc77d06d660854498b9f6b2fa564`。
+用户操作挂载开关后，主命名空间已经没有 system、system_ext、product、odm，
+但它们的 DM 名称都还在。cnss pid 633 的私有 mountinfo 中仍然保留四者。
+因此这次不能再描述为同一个主命名空间 umount 失败：
+普通卸载已经成功，失败的是后续释放 DM；再次挂载又尝试创建同名 DM。
+
+此前只有安装前的 services::pin 路径清理 cnss 的继承挂载，
+挂载页面直接调用 unmount_one，没有经过同样的清理。
+此外 pin 只枚举当前可见挂载，也会漏掉已从主命名空间卸载的残留映射。
+
+本轮修改：
+
+- 抽出 services::release_private_mounts。挂载页面卸载时，只清理 cnss
+  私有命名空间中对应的一个挂载；保留其他分区及私有 RAM userdata。
+- 安装前清理根据 slot_bases 枚举所有 slot 挂载点，覆盖此前已手动卸载的项。
+- map_and_mount 遇到已有 DM 时，只在设备、起始扇区、长度、偏移、target 类型
+  全部匹配 super 且 DM 为只读时复用。冲突、可写或不匹配的映射仍报错。
+  不 reload 持有中的映射，复用挂载失败也不删除不属于本次创建的映射。
+- 挂载页面的挂载/卸载失败同步写入 recovery.log，后续可直接抓取。
+- odm 卸载后，ramdisk 的 `/odm/etc -> /vendor/odm/etc` 与
+  vendor 的 `/vendor/odm -> /odm` 会形成循环，读取 fstab 出现 ELOOP。
+  只在对应根挂载点未挂载时跳过这种候选路径，继续使用有效 vendor fstab；
+  已挂载文件系统中的 ELOOP 及其他错误仍然返回。
+
+诊断程序：
+
+- pipa_mount_release_probe 在独立只读 odm 映射上创建私有继承视图，
+  确认主命名空间普通卸载成功后 DM 删除仍 EBUSY，再用真实清理函数释放
+  那份私有视图，最后确认 DM 删除成功。测试不卸载真实 odm。
+- pipa_mount_state_probe 默认只读状态。`--restore-readonly` 恢复四个已卸载
+  分区的只读视图；`--exercise-readonly` 清理四个分区在 cnss 中的继承视图，
+  对实际 system、system_ext、product、odm 分别执行两轮普通卸载、DM 删除、
+  重新只读挂载。它会改变 recovery 的挂载状态，不是只读查询命令；
+  要求 pipa 且无待处理 snapshot，不写分区内容，不处理 vendor。
+
+实际设备验证结果：
+
+```text
+Readable userdata fstab entries: 1
+system_b: ordinary unmount, DM removal and read-only remount, round 1/2 PASS
+system_ext_b: ordinary unmount, DM removal and read-only remount, round 1/2 PASS
+product_b: ordinary unmount, DM removal and read-only remount, round 1/2 PASS
+odm_b: ordinary unmount, DM removal and read-only remount, round 1/2 PASS
+exercise_exit=0
+```
+
+四个实际分区测试后已全部恢复只读挂载。cnss 私有 mountinfo 不再有这四项，
+仍保留 vendor 和 16 MiB tmpfs /data。测试没有修改 boot、cust 或 super 内容。
+block/vab/info 共 59 项测试通过，包含拒绝复用冲突 DM 表的测试。
+
+当前回合只在运行设备上清理了继承视图；UI 源码修复仍需提交并重新构建，
+尚未对新 UI 做冷启动验收。vendor 的运行程序、共享库及 pin 的真实引用仍是
+另一个问题。四个实际分区可释放不等于完整 ROM 的 super 更新已经通过。

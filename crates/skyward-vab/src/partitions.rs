@@ -80,7 +80,26 @@ fn bytes(p: &Partition) -> u64 {
 /// Map partition `p` from super read-only with device-mapper and mount it
 /// over its point. A device that does not mount is removed again.
 fn map_and_mount(p: &Partition, devices: &[(u32, u32)], slot: Slot) -> Result<Mounted> {
-    let device = dm::create(&p.name, &targets(p, devices), true)?;
+    let wanted = targets(p, devices);
+    if dm::status(&p.name)?.is_some() {
+        ensure!(dm::readonly(&p.name)? && table_matches(&dm::table(&p.name)?, &wanted),
+            "existing {} mapping differs from the read-only super table", p.name);
+        // An earlier unmount may have succeeded while DM removal failed
+        // because another namespace still held its view. Reuse only an
+        // identical read-only mapping; never reload or remove a held one.
+        let device = Path::new("/dev/block").join(dm_node(&p.name)?);
+        let mount_point = mount_point(base(p, slot));
+        if let Some(shown) = mount::visible(&mount_point)? {
+            ensure!(shown.device == devnum(&device)?,
+                "{} is occupied by another device", mount_point.display());
+            return Ok(Mounted { partition: p.name.clone(), device, mount_point, filesystem: shown.filesystem });
+        }
+        fs::create_dir_all(&mount_point).with_context(|| format!("create {}", mount_point.display()))?;
+        let filesystem = mount::mount_ro_over(&device, &mount_point)
+            .with_context(|| format!("mount existing {}", p.name))?.to_string();
+        return Ok(Mounted { partition: p.name.clone(), device, mount_point, filesystem });
+    }
+    let device = dm::create(&p.name, &wanted, true)?;
     let mount_point = mount_point(base(p, slot));
     let mounted = (|| -> Result<String> {
         fs::create_dir_all(&mount_point).with_context(|| format!("create {}", mount_point.display()))?;
@@ -92,6 +111,59 @@ fn map_and_mount(p: &Partition, devices: &[(u32, u32)], slot: Slot) -> Result<Mo
             Ok(()) => e,
             Err(r) => e.context(format!("removing {} afterwards failed too: {r:#}", p.name)),
         }),
+    }
+}
+
+fn table_matches(lines: &[dm::Line], targets: &[dm::Target]) -> bool {
+    if lines.len() != targets.len() { return false; }
+    let mut start = 0u64;
+    for (line, target) in lines.iter().zip(targets) {
+        if line.start != start || line.sectors != target.sectors() { return false; }
+        let matches = match target {
+            dm::Target::Linear { device: (major, minor), offset, .. } => {
+                line.kind == "linear" && line.text.split_whitespace()
+                    .eq([format!("{major}:{minor}"), offset.to_string()].iter().map(String::as_str))
+            }
+            dm::Target::Zero { .. } => line.kind == "zero" && line.text.trim().is_empty(),
+            _ => false,
+        };
+        if !matches { return false; }
+        let Some(next) = start.checked_add(line.sectors) else { return false };
+        start = next;
+    }
+    true
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+
+    #[test]
+    fn retained_mapping_must_match_devices_offsets_lengths_and_target_kinds() {
+        let targets = [
+            dm::Target::Linear { sectors: 16, device: (259, 29), offset: 128 },
+            dm::Target::Zero { sectors: 8 },
+        ];
+        let lines = vec![
+            dm::Line { start: 0, sectors: 16, kind: "linear".into(), text: "259:29 128".into() },
+            dm::Line { start: 16, sectors: 8, kind: "zero".into(), text: String::new() },
+        ];
+        assert!(table_matches(&lines, &targets));
+        for text in ["259:30 128", "259:29 129", "259:29 128 extra"] {
+            let mut changed = lines.clone();
+            changed[0].text = text.into();
+            assert!(!table_matches(&changed, &targets));
+        }
+        let mut changed = lines.clone();
+        changed[1].start = 17;
+        assert!(!table_matches(&changed, &targets));
+        changed = lines.clone();
+        changed[1].sectors = 7;
+        assert!(!table_matches(&changed, &targets));
+        changed = lines.clone();
+        changed[0].kind = "snapshot".into();
+        assert!(!table_matches(&changed, &targets));
+        assert!(!table_matches(&lines[..1], &targets));
     }
 }
 

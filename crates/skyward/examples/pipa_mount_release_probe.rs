@@ -1,9 +1,16 @@
 #[cfg(target_os = "android")]
+#[allow(dead_code)]
+#[path = "../src/private_data.rs"]
+mod private_data;
+
+#[cfg(target_os = "android")]
 fn main() -> anyhow::Result<()> {
     use anyhow::{ensure, Context};
     use skyward_block::{dm, mount};
     use std::fs::{self, File};
     use std::path::PathBuf;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
     use std::time::Duration;
 
     ensure!(skyward_sys::prop("ro.product.device").as_deref() == Some("pipa"), "pipa only");
@@ -90,9 +97,39 @@ fn main() -> anyhow::Result<()> {
         println!("PASS: property imports, overrides and symlink cycles");
         let count = fs::read_dir(&point)?.collect::<Result<Vec<_>, _>>()?.len();
         println!("Read {count} directory entries without path-stat");
-        mount::umount(&point)?;
-        mounted = false;
-        println!("PASS: ordinary unmount succeeded after init observed the mount");
+        // Reproduce cnss inheriting a view that is invisible in the parent.
+        let mut command = Command::new("/system/bin/sleep");
+        command.arg("30").current_dir("/");
+        unsafe {
+            command.pre_exec(|| {
+                if libc::unshare(libc::CLONE_NEWNS) != 0
+                    || libc::mount(std::ptr::null(), c"/".as_ptr(), std::ptr::null(),
+                        libc::MS_REC | libc::MS_PRIVATE, std::ptr::null()) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut holder = command.spawn()?;
+        let released = (|| -> anyhow::Result<()> {
+            mount::umount(&point)?;
+            mounted = false;
+            println!("PASS: ordinary unmount succeeded after init observed the mount");
+            let error = dm::remove(&name).expect_err("private namespace must retain the probe mapping");
+            ensure!(error.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.raw_os_error() == Some(libc::EBUSY)),
+                "unexpected DM removal error: {error:#}");
+            println!("REPRODUCED: parent unmount succeeded but inherited namespace keeps DM busy");
+            private_data::release_slot_mounts(holder.id(), &[point.clone()])?;
+            Ok(())
+        })();
+        let stopped = holder.kill();
+        let waited = holder.wait();
+        released?;
+        stopped?;
+        waited?;
+        println!("PASS: released only the temporary private view");
         Ok(())
     })();
     let cleanup_mount = if mounted { mount::umount(&point) } else { Ok(()) };
