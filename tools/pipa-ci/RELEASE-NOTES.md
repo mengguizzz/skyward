@@ -8,7 +8,6 @@
 | --- | --- |
 | `skyward-pipa-cust-installer.zip` | 推荐安装包。在现有 TWRP 或 Skyward 中安装，给当前槽位的 boot 添加 Recovery 启动入口，并将 Skyward 写入 cust 的专用目录。 |
 | `skyward-pipa-boot.img` | 独立 boot 镜像，供**调试**与**验证**使用。它不是基于使用者当前 boot 动态打补丁，不建议作为常规升级方式，只适用于临时启动，比如fastboot boot skyward-pipa-boot.img 。 |
-| `routing-verification.json` | 确认启动 overlay、boot 内的回退程序和 cust payload 来自同一次源码构建，并记录离线补丁检查结果。 |
 
 ## 安装与升级
 
