@@ -504,7 +504,7 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     // there to ueventd, which looks in the recovery's firmware folders.
     std::fs::write(FIRMWARE_FALLBACK, "1").with_context(|| format!("write 1 to {FIRMWARE_FALLBACK}"))?;
     if let Some(firmware) = &cfg.firmware {
-        mount_firmware(&firmware.partition)?;
+        mount_firmware(firmware)?;
     }
     for name in &cfg.partitions.mounted {
         let at = skyward_block::fstab::mount(name)?;
@@ -631,12 +631,24 @@ const FIRMWARE_SHOWN: &str = "/firmware";
 /// world's apps look for theirs, and show it where the recovery's ueventd
 /// looks for the rest. Both stay when the recovery service starts again.
 #[cfg(target_os = "android")]
-fn mount_firmware(partition: &str) -> Result<()> {
+fn mount_firmware(firmware: &skyward_config::FirmwarePartition) -> Result<()> {
+    let partition = &firmware.partition;
     let shown = Path::new(FIRMWARE_SHOWN);
     if skyward_block::mount::is_mount_point(shown)? {
         return Ok(());
     }
-    let at = skyward_block::fstab::mount(partition)?;
+    let at = if let Some(options) = &firmware.mount_options {
+        let entry = skyward_block::fstab::partition(partition)?
+            .with_context(|| format!("the phone's own table does not mount {partition}"))?;
+        let at = std::path::PathBuf::from(&entry.mount_point);
+        if !skyward_block::mount::is_mount_point(&at)? {
+            std::fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
+            skyward_block::mount::mount(Path::new(&skyward_block::fstab::device(&entry)?), &at, &entry.filesystem, options)?;
+        }
+        at
+    } else {
+        skyward_block::fstab::mount(partition)?
+    };
     std::fs::create_dir_all(shown).with_context(|| format!("make {}", shown.display()))?;
     skyward_block::mount::bind(&at, shown)?;
     skyward_sys::kmsg(&format!("{partition} is mounted on {}, shown at {}", at.display(), shown.display()))

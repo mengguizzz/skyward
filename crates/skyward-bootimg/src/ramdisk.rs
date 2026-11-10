@@ -49,11 +49,14 @@ pub struct Ramdisk {
 }
 
 impl Ramdisk {
-    /// Unpack an LZ4 (legacy framing) compressed newc archive, as Android
-    /// boot images carry.
+    /// Unpack a gzip or LZ4 compressed newc archive from a boot image.
     pub fn decode(compressed: &[u8]) -> Result<Self> {
         let mut cpio = Vec::new();
-        lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
+        if compressed.starts_with(&[0x1f, 0x8b]) {
+            flate2::read::GzDecoder::new(compressed).read_to_end(&mut cpio).context("gzip decode")?;
+        } else {
+            lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
+        }
         let mut entries = Vec::new();
         let mut rest = Cursor::new(cpio.as_slice());
         loop {
@@ -85,6 +88,17 @@ impl Ramdisk {
     /// unpacker reads no other LZ4 framing) at its highest compression.
     pub fn encode(&self) -> Result<Vec<u8>> {
         lz4_tool(&self.archive()?)
+    }
+
+    /// Keep gzip for recovery-as-boot kernels built without LZ4 initramfs.
+    pub fn encode_like(&self, original: &[u8]) -> Result<Vec<u8>> {
+        if original.starts_with(&[0x1f, 0x8b]) {
+            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+            encoder.write_all(&self.archive()?).context("gzip encode")?;
+            Ok(encoder.finish().context("finish gzip ramdisk")?)
+        } else {
+            self.encode()
+        }
     }
 
     /// Pack as a newc archive, uncompressed.
@@ -296,6 +310,27 @@ fn lz4_tool(input: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gzip_boot_ramdisk_keeps_compression_and_metadata() {
+        let mut rd = Ramdisk { entries: Vec::new() };
+        rd.add("system/bin/recovery", 0o750, b"recovery".to_vec()).unwrap();
+        rd.link("init", "/system/bin/init").unwrap();
+        let binary = rd.entries.iter_mut().find(|e| e.name == "system/bin/recovery").unwrap();
+        binary.uid = 1000;
+        binary.gid = 1001;
+        binary.mtime = 12345;
+        let packed = rd.encode_like(&[0x1f, 0x8b]).unwrap();
+        assert!(packed.starts_with(&[0x1f, 0x8b]));
+        let back = Ramdisk::decode(&packed).unwrap();
+        let binary = back.find("system/bin/recovery").unwrap();
+        assert_eq!((binary.mode, binary.uid, binary.gid, binary.mtime), (S_IFREG | 0o750, 1000, 1001, 12345));
+        assert_eq!(binary.data, b"recovery");
+        let init = back.find("init").unwrap();
+        assert_eq!(init.mode & S_IFMT, S_IFLNK);
+        assert_eq!(init.data, b"/system/bin/init");
+        assert!(Ramdisk::decode(&packed[..packed.len() / 2]).is_err());
+    }
 
     #[test]
     fn round_trip_keeps_metadata() {

@@ -1,0 +1,24 @@
+[package]
+name = "pipa-cust-loader"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+sha2 = "0.10"
+skyward-bootimg = { path = "../../crates/skyward-bootimg" }
+
+[[bin]]
+name = "recovery-loader"
+path = "src/main.rs"
+
+[[bin]]
+name = "boot-patcher"
+path = "src/patcher.rs"
+
+[[bin]]
+name = "cust-readonly"
+path = "src/cust_readonly.rs"

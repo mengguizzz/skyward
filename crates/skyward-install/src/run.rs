@@ -863,16 +863,33 @@ fn run_script(ctx: &mut Context, size: u64) -> Result<Done> {
     let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
     extract_script()?;
     shell_at_sbin()?;
-    let kept = hold(ctx, slot)?;
-    installed_boot_set()?;
-    detach_once(ctx)?;
+    let cust_update = if prop("ro.product.device").as_deref() == Some("pipa") {
+        let file = File::open(fuse::PACKAGE).context("open the cust update package")?;
+        let mut zip = zip::ZipArchive::new(BufReader::new(file)).context("read the cust update directory")?;
+        package::pipa_cust_update(&mut zip)?
+    } else {
+        false
+    };
+    let kept = if cust_update {
+        let _ = kmsg("install: pipa cust self-update; system mounts and boot routing retained");
+        None
+    } else {
+        let kept = hold(ctx, slot)?;
+        installed_boot_set()?;
+        detach_once(ctx)?;
+        kept
+    };
     // While an update is in flight, the slot's partitions in super are its
     // and stay unmapped.
-    let mapped = match skyward_vab::snapshot_state()? {
-        SnapshotState::None => skyward_vab::map_slot(slot)?,
-        state => {
-            let _ = kmsg(&format!("install: the slot's partitions stay unmapped while an update is in flight ({state:?})"));
-            SlotMaps::default()
+    let mapped = if cust_update {
+        SlotMaps::default()
+    } else {
+        match skyward_vab::snapshot_state()? {
+            SnapshotState::None => skyward_vab::map_slot(slot)?,
+            state => {
+                let _ = kmsg(&format!("install: the slot's partitions stay unmapped while an update is in flight ({state:?})"));
+                SlotMaps::default()
+            }
         }
     };
     let mounted = skyward_block::mount::mount_ids()?;

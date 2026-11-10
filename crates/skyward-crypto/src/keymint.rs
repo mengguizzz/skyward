@@ -1,7 +1,12 @@
+#![cfg_attr(not(target_os = "android"), allow(dead_code))]
+
 use crate::token::Token;
+#[cfg(target_os = "android")]
 use anyhow::{Context, Result};
+#[cfg(target_os = "android")]
 use skyward_binder::driver::{Binder, Handle};
 use skyward_binder::parcel::Parcel;
+#[cfg(target_os = "android")]
 use skyward_binder::{service, status};
 
 /// The phone's own key service, the only thing that can use a key the
@@ -41,7 +46,6 @@ const PADDING_NONE: i32 = 1;
 
 /// What a key parameter is tagged with. The high bits say which kind of
 /// value follows, which is why the numbers look arbitrary.
-const TAG_PURPOSE: i32 = 536_870_913;
 const TAG_BLOCK_MODE: i32 = 536_870_916;
 const TAG_PADDING: i32 = 536_870_918;
 const TAG_MAC_LENGTH: i32 = 805_307_371;
@@ -50,7 +54,6 @@ const TAG_NONCE: i32 = -1_879_047_191;
 
 /// Which arm of a parameter's value is used.
 const VALUE_PADDING_MODE: i32 = 3;
-const VALUE_KEY_PURPOSE: i32 = 7;
 const VALUE_INTEGER: i32 = 11;
 const VALUE_BLOB: i32 = 14;
 const VALUE_BLOCK_MODE: i32 = 2;
@@ -60,6 +63,34 @@ enum Value<'a> {
     Enum(i32, i32),
     Integer(i32),
     Blob(&'a [u8]),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skyward_binder::parcel::Reader;
+
+    #[test]
+    fn gcm_begin_parameters_do_not_repeat_the_separate_purpose_argument() {
+        for app_id in [&[][..], &[9, 8][..]] {
+            let mut parcel = Parcel::default();
+            gcm_params(&mut parcel, app_id, &[7; NONCE_BYTES]);
+            let mut read = Reader::new(parcel.bytes());
+            let count = read.i32().unwrap();
+            assert_eq!(count, if app_id.is_empty() { 4 } else { 5 });
+            let mut tags = Vec::new();
+            for _ in 0..count {
+                let end = read.structure().unwrap();
+                tags.push(read.i32().unwrap());
+                read.go(end).unwrap();
+            }
+            assert_eq!(&tags[..3], &[TAG_BLOCK_MODE, TAG_PADDING, TAG_MAC_LENGTH]);
+            assert_eq!(tags.last(), Some(&TAG_NONCE));
+            assert_eq!(tags.contains(&TAG_APPLICATION_ID), !app_id.is_empty());
+            assert!(!tags.contains(&536_870_913), "purpose is an argument of begin, not an operation parameter");
+            assert_eq!(read.here(), parcel.bytes().len());
+        }
+    }
 }
 
 fn parameter(p: &mut Parcel, tag: i32, value: Value) {
@@ -120,16 +151,45 @@ pub struct Hardware {
     pub author: String,
 }
 
+/// Operation parameters for AES-GCM. Purpose is already a separate begin
+/// argument; an absent application binding must stay absent.
+fn gcm_params(call: &mut Parcel, app_id: &[u8], nonce: &[u8]) {
+    call.i32(if app_id.is_empty() { 4 } else { 5 });
+    parameter(call, TAG_BLOCK_MODE, Value::Enum(VALUE_BLOCK_MODE, BLOCK_MODE_GCM));
+    parameter(call, TAG_PADDING, Value::Enum(VALUE_PADDING_MODE, PADDING_NONE));
+    parameter(call, TAG_MAC_LENGTH, Value::Integer(128));
+    if !app_id.is_empty() {
+        parameter(call, TAG_APPLICATION_ID, Value::Blob(app_id));
+    }
+    parameter(call, TAG_NONCE, Value::Blob(nonce));
+}
+
 /// The phone's key service, as this program talks to it.
+#[cfg(target_os = "android")]
 pub struct KeyMint<'a> {
     device: Handle<'a>,
 }
 
+#[cfg(target_os = "android")]
 impl<'a> KeyMint<'a> {
     /// Reach the running key service, or say that none is.
     pub fn open(binder: &'a Binder) -> Result<KeyMint<'a>> {
-        let device = service::find(binder, SERVICE)?
-            .with_context(|| format!("{SERVICE} is not running; the phone's key service has to be started first"))?;
+        let device = match service::find(binder, SERVICE)? {
+            Some(device) => device,
+            None => {
+                // AOSP keystore2 hosts the Keymaster 4.x bridge under this
+                // service; it returns a KeyMint handle without registering a HAL.
+                let compat = service::find(binder, "android.security.compat")?
+                    .with_context(|| format!("{SERVICE} and android.security.compat are not running"))?;
+                let mut call = Parcel::call("android.security.compat.IKeystoreCompatService");
+                call.i32(1); // TRUSTED_ENVIRONMENT; never substitute software keys.
+                let reply = compat.transact(1, &call).context("open the hardware Keymaster compatibility device")?;
+                let mut read = reply.read();
+                status::ok(&mut read).context("open the hardware Keymaster compatibility device")?;
+                let handle = read.object()?.context("the compatibility service returned no hardware KeyMint device")?;
+                Handle::hold(binder, handle)?
+            }
+        };
         Ok(KeyMint { device })
     }
 
@@ -221,7 +281,7 @@ impl<'a> KeyMint<'a> {
                 // now; the one on disk is left as it is, so nothing of the
                 // phone's own is changed by reading it here.
                 let renewed = self
-                    .upgrade(key_blob, |call| Self::gcm_params(call, app_id, nonce))
+                    .upgrade(key_blob, |call| gcm_params(call, app_id, nonce))
                     .context("renew the key for the firmware running now")?;
                 self.begin(&renewed, app_id, nonce, note)?
             }
@@ -232,33 +292,12 @@ impl<'a> KeyMint<'a> {
         Ok(out)
     }
 
-    /// What the key service has to be told to use an AES-GCM key: how it is
-    /// used, how long its tag is, what it is bound to, and the nonce it was
-    /// encrypted under.
-    ///
-    /// What a key is bound to is named only where there is something: the
-    /// secure world folds the binding into the key it unwraps the key blob
-    /// with, and a binding to nothing named is not the same to it as none
-    /// named at all, so naming an empty one leaves it unable to unwrap a
-    /// key that was made bound to nothing.
-    fn gcm_params(call: &mut Parcel, app_id: &[u8], nonce: &[u8]) {
-        call.i32(if app_id.is_empty() { 5 } else { 6 });
-        parameter(call, TAG_BLOCK_MODE, Value::Enum(VALUE_BLOCK_MODE, BLOCK_MODE_GCM));
-        parameter(call, TAG_PADDING, Value::Enum(VALUE_PADDING_MODE, PADDING_NONE));
-        parameter(call, TAG_MAC_LENGTH, Value::Integer(128));
-        if !app_id.is_empty() {
-            parameter(call, TAG_APPLICATION_ID, Value::Blob(app_id));
-        }
-        parameter(call, TAG_NONCE, Value::Blob(nonce));
-        parameter(call, TAG_PURPOSE, Value::Enum(VALUE_KEY_PURPOSE, PURPOSE_DECRYPT));
-    }
-
     /// Open a decryption with the key service and keep hold of it.
     fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], note: Option<&Token>) -> Result<Handle<'a>> {
         let mut call = Parcel::call(DEVICE);
         call.i32(PURPOSE_DECRYPT);
         call.blob(key_blob);
-        Self::gcm_params(&mut call, app_id, nonce);
+        gcm_params(&mut call, app_id, nonce);
         // A key guarded by the screen lock takes the note the secure world
         // wrote when the user answered it; one that is not guarded takes
         // nothing, and is refused nothing for carrying a note either.

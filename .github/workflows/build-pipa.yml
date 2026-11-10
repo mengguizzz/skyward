@@ -1,0 +1,72 @@
+name: Build Xiaomi Pad 6
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "HTTPS URL of tested boot-fbboot.img (192 MiB)"
+        required: true
+        type: string
+      routing_url:
+        description: "HTTPS URL of pipa-routing.zip"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipa-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.99.1
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ramdisk test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes lz4
+      - name: Install pinned Rust
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup target add --toolchain 1.99.1 aarch64-linux-android
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r29
+          add-to-path: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tools/pipa-cust-installer -> target/pipa-cust-installer
+      - name: Download fixed inputs
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          ROUTING_URL: ${{ inputs.routing_url }}
+        run: |
+          mkdir -p inputs
+          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' "$BASE_URL" -o inputs/boot-fbboot.img
+          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' "$ROUTING_URL" -o inputs/pipa-routing.zip
+          python3 tools/pipa-ci/package.py validate inputs/boot-fbboot.img inputs/pipa-routing.zip
+      - name: Build and verify pipa outputs
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: bash tools/pipa-ci/build.sh inputs/boot-fbboot.img inputs/pipa-routing.zip out/pipa
+      - uses: actions/upload-artifact@v7
+        with:
+          name: skyward-pipa-${{ github.sha }}
+          path: |
+            out/pipa/skyward-pipa-boot.img
+            out/pipa/skyward-pipa-cust-installer.zip
+            out/pipa/SHA256SUMS
+            out/pipa/verification.json
+            out/pipa/build-info.json
+          if-no-files-found: error
+          retention-days: 14

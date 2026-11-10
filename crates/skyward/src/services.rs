@@ -13,6 +13,9 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "private_data.rs"]
+mod private_data;
+
 /// A program that ends sooner than this after starting waits this long
 /// before it is started again.
 const RESTART_DELAY: Duration = Duration::from_secs(1);
@@ -41,6 +44,13 @@ const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
     let known = ueventd::accounts(&ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).copied().collect::<Vec<_>>());
     for s in services {
+        // Old pipa boot configs created this in the shared namespace.
+        if skyward_sys::prop("ro.product.device").as_deref() == Some("pipa")
+            && s.path == "/system/bin/mkdir" && s.oneshot
+            && s.args == ["-p", "/data/vendor/wifi/sockets"]
+        {
+            continue;
+        }
         if !Path::new(&s.path).is_file() {
             bail!("{} is missing; is its partition mounted?", s.path);
         }
@@ -50,7 +60,7 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
         }
         let who = Credentials::of(&s, &known)?;
         if s.oneshot {
-            let status = command(&s, &who).status().with_context(|| format!("run {}", s.path))?;
+            let status = command(&s, &who)?.status().with_context(|| format!("run {}", s.path))?;
             ensure!(status.success(), "{} {} ended: {status}", s.path, s.args.join(" "));
             skyward_sys::kmsg(&format!("ran {} {}", s.path, s.args.join(" ")))?;
             continue;
@@ -193,7 +203,8 @@ fn supervise(s: &Service, who: &Credentials) -> ! {
     loop {
         let started = Instant::now();
         let ended = match running(&s.path) {
-            Some(pid) => wait_for(pid).map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
+            Some(pid) => retire_unisolated(s, pid).and_then(|()| wait_for(pid))
+                .map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
             None => run(s, who),
         };
         let line = match ended {
@@ -207,9 +218,34 @@ fn supervise(s: &Service, who: &Credentials) -> ! {
     }
 }
 
+fn needs_private_data(s: &Service) -> bool {
+    s.path == "/vendor/bin/cnss-daemon"
+        && skyward_sys::prop("ro.product.device").as_deref() == Some("pipa")
+}
+
+fn retire_unisolated(s: &Service, pid: u32) -> Result<()> {
+    if !needs_private_data(s) {
+        return Ok(());
+    }
+    let own = fs::read_link("/proc/self/ns/mnt")?;
+    let other = fs::read_link(format!("/proc/{pid}/ns/mnt"))?;
+    let mounts = fs::read_to_string(format!("/proc/{pid}/mountinfo"))?;
+    let ram_data = mounts.lines().any(|line| {
+        line.split_whitespace().nth(4) == Some("/data") && line.contains(" - tmpfs ")
+    });
+    if own == other || !ram_data {
+        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if rc != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+            return Err(io::Error::last_os_error()).context("stop cnss without private data");
+        }
+        let _ = skyward_sys::kmsg("retiring cnss without private RAM data before restarting it");
+    }
+    Ok(())
+}
+
 /// Start the program and wait for it to end.
 fn run(s: &Service, who: &Credentials) -> Result<String> {
-    let mut child = command(s, who).spawn().with_context(|| format!("start {}", s.path))?;
+    let mut child = command(s, who)?.spawn().with_context(|| format!("start {}", s.path))?;
     let status = child.wait().context("wait for it")?;
     Ok(format!("pid {} ended: {status}", child.id()))
 }
@@ -217,7 +253,12 @@ fn run(s: &Service, who: &Credentials) -> Result<String> {
 /// The program as it is started: with what it is given, from the top of the
 /// tree, reading and writing nothing of the recovery's, finding its
 /// libraries where it names them, and as `who`.
-fn command(s: &Service, who: &Credentials) -> Command {
+fn command(s: &Service, who: &Credentials) -> io::Result<Command> {
+    let private = if needs_private_data(s) {
+        Some(private_data::PrivateData::prepare()?)
+    } else {
+        None
+    };
     let mut cmd = Command::new(&s.path);
     cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if !s.libraries.is_empty() {
@@ -226,8 +267,13 @@ fn command(s: &Service, who: &Credentials) -> Command {
     let who = who.clone();
     // Only system calls run between the fork and the exec, on what was
     // worked out before it.
-    unsafe { cmd.pre_exec(move || who.take_on()) };
-    cmd
+    unsafe { cmd.pre_exec(move || {
+        if let Some(private) = &private {
+            private.enter()?;
+        }
+        who.take_on()
+    }) };
+    Ok(cmd)
 }
 
 /// Lock in memory every file the running programs have mapped or open on
@@ -262,6 +308,16 @@ pub fn pin(services: &[Service], mounted: &[Mounted]) -> Result<Vec<PathBuf>> {
         let _ = skyward_sys::kmsg(&format!("kept {} in memory", file.display()));
         if !busy.contains(&m.mount_point) {
             busy.push(m.mount_point.clone());
+        }
+    }
+    // Private cnss namespaces inherit every slot mount, including ones
+    // whose files cnss never opens. They must release those references too.
+    let points: Vec<_> = mounted.iter().map(|m| m.mount_point.clone()).collect();
+    for s in services.iter().filter(|s| needs_private_data(s)) {
+        if let Some(pid) = running(&s.path) {
+            private_data::release_slot_mounts(pid, &points)
+                .context("release inherited slot mounts in cnss namespace")?;
+            let _ = skyward_sys::kmsg("released cnss private namespace slot mounts; private RAM data retained");
         }
     }
     Ok(busy)

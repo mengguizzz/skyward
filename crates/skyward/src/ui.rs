@@ -90,7 +90,7 @@ struct Backlight {
 }
 
 impl Backlight {
-    fn open() -> Result<Self> {
+    fn open(normal_max_brightness: Option<u32>) -> Result<Self> {
         let mut dirs: Vec<PathBuf> = fs::read_dir("/sys/class/backlight")
             .context("read /sys/class/backlight")?
             .map(|e| e.map(|e| e.path()))
@@ -110,7 +110,14 @@ impl Backlight {
                 .parse()
                 .with_context(|| format!("parse {name}"))
         };
-        let top = normal_max(read("max_brightness")?)?;
+        let max = read("max_brightness")?;
+        let top = match normal_max_brightness {
+            Some(value) => {
+                ensure!(value > 0 && value <= max, "normal brightness {value} is outside driver range 1..={max}");
+                value
+            }
+            None => normal_max(max)?,
+        };
         let level = read("brightness")?;
         Ok(Backlight { path: dir.join("brightness"), top, level })
     }
@@ -1051,7 +1058,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     }
     let mut info = skyward_info::collect(cfg)?;
     let fonts = Fonts::load(font, 0, mono)?;
-    let mut surface = KmsSurface::open("/dev/dri/card0")?;
+    let mut surface = KmsSurface::open_with_options("/dev/dri/card0", skyward_ui::surface::kms::Options {
+        max_refresh_hz: cfg.display.max_refresh_hz,
+        disable_blanking: cfg.display.disable_blanking,
+        reset_on_open: cfg.display.reset_on_open,
+    })?;
     let (w, h) = surface.size();
     eprintln!("display {}", surface.describe());
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
@@ -1060,7 +1071,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // adbd and fastbootd ask over it to go over to fastboot and back.
     let control = Control::open()?;
     let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
-    let mut backlight = Backlight::open()?;
+    let mut backlight = Backlight::open(cfg.display.normal_max_brightness)?;
     let first = match &request.work {
         Work::Fastboot => Screen::Fastboot,
         Work::PromptWipeData => Screen::CantStart,

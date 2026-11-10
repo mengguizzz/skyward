@@ -147,6 +147,10 @@ pub struct Write {
 pub struct FirmwarePartition {
     /// The partition's name, without the slot it is of.
     pub partition: String,
+    /// Explicit read-only options for recovery bases whose policy cannot
+    /// resolve a filesystem context from the installed system's fstab.
+    #[serde(default)]
+    pub mount_options: Option<Vec<String>>,
 }
 
 /// A file a driver asks the firmware loader for, and where it is.
@@ -271,6 +275,27 @@ pub struct Device {
     /// System property that carries the vendor OS version.
     #[serde(default = "default_os_version_prop")]
     pub os_version_prop: String,
+    /// libbinder's wire mark in the recovery base, which custom recoveries
+    /// may build as a system library rather than a recovery library.
+    #[serde(default)]
+    pub binder_header: Option<BinderHeader>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum BinderHeader {
+    #[serde(rename = "RECO")]
+    Recovery,
+    #[serde(rename = "SYST")]
+    System,
+}
+
+impl BinderHeader {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Recovery => "RECO",
+            Self::System => "SYST",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -288,6 +313,18 @@ pub struct Display {
     /// sliding over another rounds its leading corners to it.
     #[serde(default)]
     pub corner_radius: u32,
+    /// Normal backlight limit for panels without Xiaomi's phone-specific
+    /// device-tree brightness properties. Checked against the driver's limit.
+    #[serde(default)]
+    pub normal_max_brightness: Option<u32>,
+    #[serde(default)]
+    pub max_refresh_hz: Option<u32>,
+    /// Keep the display processor running while the backlight is off.
+    #[serde(default)]
+    pub disable_blanking: bool,
+    /// Drop the bootloader's scanout before setting up our own planes.
+    #[serde(default)]
+    pub reset_on_open: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -503,6 +540,7 @@ impl DeviceConfig {
 
     pub fn parse(text: &str) -> Result<Self> {
         let cfg: DeviceConfig = toml::from_str(text).context("parse device config")?;
+        ensure!(cfg.display.max_refresh_hz != Some(0), "[display] max_refresh_hz must be positive");
         for log in &cfg.wipe.logs {
             let path = Path::new(log);
             let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
@@ -517,6 +555,10 @@ impl DeviceConfig {
         if let Some(firmware) = &cfg.firmware {
             let name = &firmware.partition;
             ensure!(!name.is_empty() && !name.contains('/'), "[firmware] partition: {name} is not a partition's name");
+            if let Some(options) = &firmware.mount_options {
+                ensure!(options.iter().any(|o| o == "ro") && !options.iter().any(|o| o == "rw"),
+                    "[firmware] mount_options must keep firmware read-only");
+            }
         }
         for name in &cfg.partitions.mounted {
             ensure!(!name.is_empty() && !name.contains('/'), "[partitions] mounted: {name} is not a partition's name");
@@ -614,6 +656,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn experimental_pipa_uses_its_recovery_base_and_builtin_wlan() {
+        let cfg = DeviceConfig::parse(include_str!("../../../experimental/pipa/device.toml")).unwrap();
+        assert_eq!(cfg.device.codename, "pipa");
+        assert_eq!((cfg.display.width, cfg.display.height, cfg.display.density), (1800, 2880, 400));
+        assert_eq!(cfg.display.normal_max_brightness, Some(2047));
+        assert_eq!(cfg.device.binder_header, Some(BinderHeader::System));
+        assert_eq!(cfg.display.max_refresh_hz, Some(120));
+        assert!(cfg.display.disable_blanking);
+        assert!(!cfg.display.reset_on_open);
+        assert!(cfg.firmware.as_ref().unwrap().mount_options.as_ref().unwrap().iter().any(|o| o == "ro"));
+        assert_eq!(cfg.services.len(), 3);
+        assert_eq!(cfg.services[0].path, "/system/bin/mkdir");
+        assert_eq!(cfg.services[0].args, ["-p", "/data/vendor/wifi/sockets"]);
+        assert!(cfg.services[0].oneshot);
+        assert_eq!(cfg.services[1].path, "/vendor/bin/qrtr-ns");
+        assert_eq!(cfg.services[2].path, "/vendor/bin/cnss-daemon");
+        assert_eq!(cfg.services[2].args, ["-n", "-l"]);
+        let wlan = cfg.wlan.as_ref().unwrap();
+        assert_eq!(wlan.libraries, ["/system/lib64", "/vendor/lib64"]);
+        assert!(wlan.modules.is_empty());
+        assert_eq!(wlan.writes[1].value.as_bytes(), b"ON\n");
+        assert!(cfg.stock.is_none());
+    }
+
+    #[test]
+    fn experimental_display_and_binder_overrides_reject_invalid_values() {
+        let text = include_str!("../../../experimental/pipa/device.toml");
+        assert!(DeviceConfig::parse(&text.replace("max_refresh_hz = 120", "max_refresh_hz = 0")).is_err());
+        assert!(DeviceConfig::parse(&text.replace("binder_header = \"SYST\"", "binder_header = \"invalid\"")).is_err());
+        assert!(DeviceConfig::parse(&text.replace("\"ro\", \"shortname=lower\"", "\"rw\", \"shortname=lower\"")).is_err());
+    }
+
+    #[test]
     fn the_commands_sit_beside_the_recovery_service_binary() {
         let folder = |path: &str| Path::new(path).parent().map(Path::to_path_buf);
         for command in ramdisk::COMMANDS {
@@ -704,7 +779,7 @@ mod tests {
             [Write { path: "/sys/class/touch/touch_dev/enable_touch_raw".into(), value: "0".into() }],
             "its controller reports positions itself"
         );
-        assert_eq!(cfg.firmware, Some(FirmwarePartition { partition: "modem".into() }));
+        assert_eq!(cfg.firmware, Some(FirmwarePartition { partition: "modem".into(), mount_options: None }));
         assert_eq!(cfg.partitions.mounted, ["persist"], "the secure world keeps its own files there");
         let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(

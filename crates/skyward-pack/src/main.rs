@@ -47,6 +47,16 @@ enum Cmd {
         /// phone or a full update package holds it, ending in its AVB footer.
         #[arg(long)]
         stock: PathBuf,
+        /// Experimental recovery-as-boot image based on an existing custom
+        /// recovery. Preserve its compression and use a boot AVB descriptor.
+        #[arg(long)]
+        experimental_boot: bool,
+        /// Append one kernel argument to an experimental boot image.
+        #[arg(long, requires = "experimental_boot")]
+        kernel_arg: Option<String>,
+        /// Replace a custom recovery's legacy MTP actions with Skyward FunctionFS.
+        #[arg(long, requires = "experimental_boot")]
+        functionfs_mtp: bool,
         /// Skyward built for the device (aarch64-linux-android).
         #[arg(long)]
         binary: PathBuf,
@@ -105,23 +115,31 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, out } => {
+        Cmd::Recovery { stock, experimental_boot, kernel_arg, functionfs_mtp, binary, system_init, config, font, mono, mono_license, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
+            if let Some(arg) = kernel_arg {
+                append_kernel_arg(img.header.cmdline.as_mut_slice(), &arg)?;
+            }
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
             // A stock recovery ramdisk has no third-party tree; refuse to build
             // on top of another custom recovery.
-            if let Some(e) = rd.entries.iter().find(|e| e.name == "FFiles" || e.name.starts_with("twres")) {
-                anyhow::bail!("{} holds {}, which is not a stock recovery", stock.display(), e.name);
+            if !experimental_boot {
+                if let Some(e) = rd.entries.iter().find(|e| e.name == "FFiles" || e.name.starts_with("twres")) {
+                    anyhow::bail!("{} holds {}, which is not a stock recovery", stock.display(), e.name);
+                }
             }
             let read = |p: &PathBuf| std::fs::read(p).with_context(|| format!("read {}", p.display()));
-            skyward_config::DeviceConfig::load(&config)?;
+            let profile = skyward_config::DeviceConfig::load(&config)?;
             rd.replace(paths::RECOVERY, read(&binary)?)?;
             // Install scripts look for the commands a stock recovery lacks
             // among its programs, and its unzip there too, a link to ziptool
             // until it points here; the recovery binary is each of them.
             let (_, recovery) = paths::RECOVERY.rsplit_once('/').expect("the recovery binary is in a folder");
             for command in paths::COMMANDS {
+                if experimental_boot {
+                    rd.entries.retain(|e| e.name != command);
+                }
                 rd.link(command, recovery)?;
             }
             rd.add(paths::SYSTEM_INIT, 0o755, read(&system_init)?)?;
@@ -134,7 +152,19 @@ fn main() -> Result<()> {
             if rd.find(paths::TASK_PROFILES).is_none() {
                 rd.add(paths::TASK_PROFILES, 0o644, TASK_PROFILES.to_vec())?;
             }
-            rd.add(paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
+            let mtp_rc = if functionfs_mtp {
+                let path = "init.recovery.usb.rc";
+                let original = &rd.find(path).context("custom recovery USB rules are missing")?.data;
+                let updated = functionfs_usb_rules(std::str::from_utf8(original).context("USB rules are not UTF-8")?);
+                rd.replace(path, updated.into_bytes())?;
+                std::str::from_utf8(MTP_RC).expect("embedded init rules are UTF-8")
+                    .replace("on fs && property:sys.usb.configfs=1", "on property:sys.usb.configfs=1")
+                    .replace("property:sys.usb.config_disable=0", "property:sys.usb.configfs=1")
+                    .into_bytes()
+            } else {
+                MTP_RC.to_vec()
+            };
+            rd.add(paths::MTP_RC, 0o644, mtp_rc)?;
             // On an unlocked device adbd keeps root when ro.secure is 0 and
             // lets any computer in without authorization when ro.adb.secure is
             // 0; init lets a later line of a property file override an earlier
@@ -147,10 +177,15 @@ fn main() -> Result<()> {
                 .data;
             let mut props = without(stock_props, &BUILD_VERSION);
             props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
+            if let Some(header) = profile.device.binder_header {
+                props = without(&props, &["ro.skyward.binder.header"]);
+                props.extend_from_slice(format!("ro.skyward.binder.header={}\n", header.as_str()).as_bytes());
+            }
             rd.replace(paths::PROP_DEFAULT, props)?;
-            img.ramdisk = rd.encode()?;
+            img.ramdisk = if experimental_boot { rd.encode_like(&img.ramdisk)? } else { rd.encode()? };
             let bytes = img.to_bytes()?;
-            write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
+            let partition = if experimental_boot { "boot" } else { "recovery" };
+            write(&out, &img, &avb::footed(&bytes, partition, size, &Sha256::digest(&bytes))?)
         }
         Cmd::Stock { config, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
@@ -161,6 +196,43 @@ fn main() -> Result<()> {
             }
         }
     }
+}
+
+fn append_kernel_arg(cmdline: &mut [u8], arg: &str) -> Result<()> {
+    ensure!(!arg.is_empty() && arg.is_ascii() && !arg.bytes().any(|b| b.is_ascii_whitespace() || b == 0), "expected one ASCII kernel argument");
+    let end = cmdline.iter().position(|b| *b == 0).context("kernel command line has no terminator")?;
+    let key = arg.split('=').next().unwrap();
+    let old = std::str::from_utf8(&cmdline[..end]).context("kernel command line is not UTF-8")?;
+    ensure!(!old.split_ascii_whitespace().any(|a| a.split('=').next() == Some(key)), "kernel argument {key} already exists");
+    let separator = usize::from(end > 0);
+    ensure!(end + separator + arg.len() < cmdline.len(), "kernel command line is full");
+    if separator != 0 { cmdline[end] = b' '; }
+    cmdline[end + separator..end + separator + arg.len()].copy_from_slice(arg.as_bytes());
+    Ok(())
+}
+
+fn functionfs_usb_rules(original: &str) -> String {
+    let mut out = String::new();
+    let mut skip = false;
+    for line in original.lines() {
+        let text = line.trim();
+        if !line.starts_with(char::is_whitespace) && !text.is_empty() && !text.starts_with('#') {
+            skip = text.starts_with("on ") && text.split_ascii_whitespace().any(|word| {
+                matches!(word, "property:sys.usb.config=mtp" | "property:sys.usb.config=mtp,adb")
+            });
+        }
+        if skip { continue; }
+        // Skyward owns MTP's mount and readiness; "none" must not clear descriptors it already wrote.
+        if text.starts_with("mount functionfs mtp ")
+            || text == "setprop sys.usb.ffs.mtp.ready 0"
+            || text == "mkdir /config/usb_gadget/g1/functions/mtp.gs0"
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// The partition a recovery is made on, as a full update package names it.
@@ -278,6 +350,26 @@ fn list(image: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_usb_rules_keep_adb_and_fastboot_but_remove_legacy_mtp() {
+        let input = "# keep license\r\non fs\r\n    mkdir /config/usb_gadget/g1/functions/mtp.gs0\r\n    mount functionfs mtp /dev/usb-ffs/mtp uid=1024\r\n    mount functionfs adb /dev/usb-ffs/adb uid=2000\r\non property:sys.usb.config=none\r\n    setprop sys.usb.ffs.mtp.ready 0\r\n    stop adbd\r\non property:sys.usb.config=mtp,adb && property:sys.usb.ffs.ready=1\r\n    symlink /config/usb_gadget/g1/functions/mtp.gs0 /config/f1\r\n    write /config/UDC controller\r\non property:sys.usb.config=fastboot\r\n    start fastbootd\r\n";
+        let output = super::functionfs_usb_rules(input);
+        assert!(output.contains("# keep license\n"));
+        assert!(output.contains("mount functionfs adb /dev/usb-ffs/adb uid=2000"));
+        assert!(output.contains("stop adbd"));
+        assert!(output.contains("on property:sys.usb.config=fastboot\n    start fastbootd"));
+        assert!(!output.contains("mtp"));
+    }
+    #[test]
+    fn kernel_argument_append_preserves_existing_arguments_and_checks_capacity() {
+        let mut line = [0u8; 80];
+        line[..14].copy_from_slice(b"twrpfastboot=1");
+        super::append_kernel_arg(&mut line, "cnss2.disable_nv_mac=1").unwrap();
+        assert!(line.starts_with(b"twrpfastboot=1 cnss2.disable_nv_mac=1\0"));
+        assert!(super::append_kernel_arg(&mut line, "cnss2.disable_nv_mac=0").is_err());
+        assert!(super::append_kernel_arg(&mut line, "two arguments").is_err());
+        assert!(super::append_kernel_arg(&mut [0u8; 3], "abc").is_err());
+    }
     use super::*;
 
     #[test]

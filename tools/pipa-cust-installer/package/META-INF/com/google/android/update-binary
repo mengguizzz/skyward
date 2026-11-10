@@ -1,0 +1,16 @@
+#!/sbin/sh
+set -eu
+OUTFD="$2"
+ZIPFILE="$3"
+case "$OUTFD" in ''|*[!0-9]*) exit 1 ;; esac
+export OUTFD
+work="$(mktemp -d /tmp/skyward-installer.XXXXXX)"
+trap 'rm -rf "$work"' EXIT
+unzip -o "$ZIPFILE" -d "$work" >/dev/null
+for tool in "$work/tools/boot-patcher" "$work/tools/recovery-loader" "$work/tools/cust-readonly"; do
+    if [ -f "$tool" ]; then chmod 755 "$tool"; fi
+done
+cd "$work"
+mode="${SKYWARD_INSTALL_MODE:---install}"
+case "$mode" in --check|--install) ;; *) exit 1 ;; esac
+sh ./install.sh "$mode"

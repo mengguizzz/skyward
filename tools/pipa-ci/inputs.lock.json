@@ -1,0 +1,19 @@
+{
+  "upstream_revision": "ff1668fdb72a46f22152a6540f49728c42081aba",
+  "rust": "1.99.1",
+  "ndk": "r29",
+  "android_api": 30,
+  "base": {
+    "size": 201326592,
+    "sha256": "d9fc1f2b625c7fda5a8d61bc57a6e9fb9e03288ffb374d59c32e9a84144c0257"
+  },
+  "routing": {
+    "sha256": "f5b95074707ff88ec9626d78bb63fcfbc48a9a8d35c19aa1c5814171e9ac0ebb",
+    "files": {
+      "overlay.gz": "9d239020712034d0af8163452cf3a1ed55e92a8f065e4ce3aab7fbe76d863b89",
+      "original-targets.txt": "86762be40b4674559c826430d402a905df06d5aab94cd66158f62d2cb5a45fbf",
+      "init.sha256": "6dc5e36016842613f3f5242ad17a52d7f04f1259036b455bad5416f672897c14",
+      "kernels.sha256": "bef69d4f145b48f06892c4ac5cdc1be20e59459753646f2ca7227d5e8864f205"
+    }
+  }
+}

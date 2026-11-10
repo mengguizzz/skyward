@@ -203,6 +203,13 @@ mod tests {
 pub mod kms {
     use super::*;
     use anyhow::{anyhow, Context};
+
+    #[derive(Default)]
+    pub struct Options {
+        pub max_refresh_hz: Option<u32>,
+        pub disable_blanking: bool,
+        pub reset_on_open: bool,
+    }
     use drm::buffer::{self, DrmFourcc, DrmModifier, PlanarBuffer};
     use drm::control::dumbbuffer::DumbBuffer;
     use drm::control::{
@@ -512,10 +519,15 @@ pub mod kms {
         h: u32,
         order: Order,
         summary: String,
+        disable_blanking: bool,
     }
 
     impl KmsSurface {
         pub fn open(path: &str) -> Result<Self> {
+            Self::open_with_options(path, Options::default())
+        }
+
+        pub fn open_with_options(path: &str, options: Options) -> Result<Self> {
             let card = open_card(path)?;
             let res = card.resource_handles().context("read KMS resources")?;
 
@@ -540,9 +552,11 @@ pub mod kms {
                 .modes()
                 .iter()
                 .filter(|m| m.size() == preferred.size())
+                .filter(|m| options.max_refresh_hz.is_none_or(|limit| m.vrefresh() <= limit))
                 .rev()
                 .max_by_key(|m| m.vrefresh())
-                .expect("the preferred mode itself has the preferred size");
+                .ok_or_else(|| anyhow!("no panel mode meets the configured refresh limit"))?;
+            let preferred = if options.max_refresh_hz.is_some_and(|limit| preferred.vrefresh() > limit) { &mode } else { preferred };
             let (w, h) = (mode.size().0 as u32, mode.size().1 as u32);
 
             // The CRTC already driving the panel, or the first one an
@@ -643,6 +657,19 @@ pub mod kms {
                 }
             }
             let crtc_props = Props::read(&card, crtc)?;
+            if options.reset_on_open {
+                let mut reset = atomic::AtomicModeReq::new();
+                for &plane in &attached {
+                    let props = Props::read(&card, plane)?;
+                    reset.add_property(plane, props.handle("FB_ID")?, property::Value::Framebuffer(None));
+                    reset.add_property(plane, props.handle("CRTC_ID")?, property::Value::CRTC(None));
+                }
+                reset.add_property(crtc, crtc_props.handle("ACTIVE")?, property::Value::Boolean(false));
+                commit(&card, reset, AtomicCommitFlags::ALLOW_MODESET).context("reset the inherited panel scanout")?;
+                if let Ok((id, _)) = conn_props.get("LP") {
+                    req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "ON")?));
+                }
+            }
             let blob = card.create_property_blob(&mode).context("create mode blob")?;
             let first = card.create_property_blob(preferred).context("create mode blob")?;
             req.add_property(conn.handle(), conn_props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
@@ -748,6 +775,7 @@ pub mod kms {
                 h,
                 order,
                 summary,
+                disable_blanking: options.disable_blanking,
             };
             s.to_fastest()?;
             Ok(s)
@@ -774,7 +802,7 @@ pub mod kms {
         /// turns off. A touch controller that follows the panel, as
         /// Xiaomi's do, rests with it either way.
         pub fn rest(&mut self) -> Result<()> {
-            if self.power != Power::On {
+            if self.disable_blanking || self.power != Power::On {
                 return Ok(());
             }
             let Some((id, _, rest)) = self.lp else { return self.turn_off() };
@@ -790,7 +818,7 @@ pub mod kms {
         /// it stop drawing power. The next frame presented turns it on
         /// again.
         pub fn turn_off(&mut self) -> Result<()> {
-            if self.power == Power::Off {
+            if self.disable_blanking || self.power == Power::Off {
                 return Ok(());
             }
             self.settle()?;

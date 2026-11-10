@@ -5,6 +5,21 @@ use anyhow::{bail, Context, Result};
 /// the recovery's own programs are built from is the recovery copy.
 const HEADER: i32 = i32::from_be_bytes(*b"RECO");
 
+fn header() -> i32 {
+    #[cfg(target_os = "android")]
+    {
+        static MARK: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+        *MARK.get_or_init(|| match skyward_sys::prop("ro.skyward.binder.header").as_deref() {
+            Some("SYST") => i32::from_be_bytes(*b"SYST"),
+            _ => HEADER,
+        })
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        HEADER
+    }
+}
+
 /// Strict mode gathers violations rather than acting on them; a caller with
 /// no policy of its own still sets that bit.
 const STRICT_MODE_PENALTY_GATHER: i32 = i32::MIN;
@@ -50,7 +65,7 @@ impl Parcel {
         let mut p = Parcel::default();
         p.i32(STRICT_MODE_PENALTY_GATHER);
         p.i32(UNSET_WORK_SOURCE);
-        p.i32(HEADER);
+        p.i32(header());
         p.string(interface);
         p
     }

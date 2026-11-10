@@ -32,6 +32,20 @@ pub enum Reply {
     Nak,
 }
 
+#[cfg(any(target_os = "android", test))]
+#[derive(Clone, Copy)]
+enum Exchange {
+    Discover,
+    Request,
+}
+
+#[cfg(any(target_os = "android", test))]
+impl Exchange {
+    fn accepts(self, reply: &Reply) -> bool {
+        matches!((self, reply), (Self::Discover, Reply::Offer { .. }) | (Self::Request, Reply::Ack(_) | Reply::Nak))
+    }
+}
+
 /// What every question asks to be told besides the address.
 const ASKED: [OptionCode; 6] = [
     OptionCode::SubnetMask,
@@ -145,7 +159,7 @@ pub use client::{obtain, keep, Kept};
 
 #[cfg(target_os = "android")]
 mod client {
-    use super::{discover, extend, reply, request, Lease, Reply};
+    use super::{discover, extend, reply, request, Exchange, Lease, Reply};
     use anyhow::{bail, Context, Result};
     use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
     use std::os::fd::AsRawFd;
@@ -202,7 +216,7 @@ mod client {
 
     /// Send `question` to `to` and wait for an answer to transaction `xid`,
     /// sending it again as long as none comes; give up after the last wait.
-    fn exchange(s: &UdpSocket, to: SocketAddrV4, question: &[u8], xid: u32, mac: [u8; 6], stop: &AtomicBool) -> Result<Option<Reply>> {
+    fn exchange(s: &UdpSocket, to: SocketAddrV4, question: &[u8], xid: u32, mac: [u8; 6], phase: Exchange, stop: &AtomicBool) -> Result<Option<Reply>> {
         let mut buf = [0u8; 1500];
         for wait in WAITS {
             s.send_to(question, to).context("send a DHCP question")?;
@@ -214,7 +228,10 @@ mod client {
                 match s.recv(&mut buf) {
                     Ok(n) => {
                         if let Some(r) = reply(&buf[..n], xid, mac) {
-                            return Ok(Some(r));
+                            // Duplicate offers may arrive after REQUEST; they do not reject it.
+                            if phase.accepts(&r) {
+                                return Ok(Some(r));
+                            }
                         }
                     }
                     Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {}
@@ -236,12 +253,12 @@ mod client {
         let s = socket(interface)?;
         for _ in 0..3 {
             let id = xid();
-            let (address, server) = match exchange(&s, broadcast(), &discover(id, mac)?, id, mac, stop)? {
+            let (address, server) = match exchange(&s, broadcast(), &discover(id, mac)?, id, mac, Exchange::Discover, stop)? {
                 Some(Reply::Offer { address, server }) => (address, server),
                 Some(_) => continue,
                 None => bail!("no DHCP server offered an address"),
             };
-            match exchange(&s, broadcast(), &request(id, mac, address, server)?, id, mac, stop)? {
+            match exchange(&s, broadcast(), &request(id, mac, address, server)?, id, mac, Exchange::Request, stop)? {
                 Some(Reply::Ack(lease)) => return Ok(lease),
                 Some(_) => continue,
                 None => bail!("the DHCP server at {server} did not give the address it offered"),
@@ -265,7 +282,7 @@ mod client {
         let s = socket(interface)?;
         let id = xid();
         let to = if anyone { broadcast() } else { SocketAddrV4::new(lease.server, SERVER_PORT) };
-        Ok(match exchange(&s, to, &extend(id, mac, lease.address)?, id, mac, stop)? {
+        Ok(match exchange(&s, to, &extend(id, mac, lease.address)?, id, mac, Exchange::Request, stop)? {
             Some(Reply::Ack(kept)) => Kept::Kept(kept),
             Some(_) => Kept::Refused,
             None => Kept::Unanswered,
@@ -278,6 +295,22 @@ mod tests {
     use super::*;
 
     const MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x04];
+
+    #[test]
+    fn requesting_a_lease_ignores_repeated_offers_until_the_ack() {
+        let packets = [
+            answer(MessageType::Offer, 7, MAC, &[]),
+            answer(MessageType::Offer, 7, MAC, &[]),
+            answer(MessageType::Ack, 7, MAC, &[]),
+        ];
+        let accepted = packets.iter().filter_map(|packet| reply(packet, 7, MAC)).find(|r| Exchange::Request.accepts(r));
+        assert!(matches!(accepted, Some(Reply::Ack(_))));
+        let nak = reply(&answer(MessageType::Nak, 7, MAC, &[]), 7, MAC).unwrap();
+        assert!(Exchange::Request.accepts(&nak));
+        assert!(!Exchange::Discover.accepts(&nak));
+        let offer = reply(&packets[0], 7, MAC).unwrap();
+        assert!(Exchange::Discover.accepts(&offer));
+    }
 
     /// What a home router answers, put together as one would.
     fn answer(kind: MessageType, xid: u32, mac: [u8; 6], with: &[DhcpOption]) -> Vec<u8> {

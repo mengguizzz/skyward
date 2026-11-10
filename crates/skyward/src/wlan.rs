@@ -14,7 +14,7 @@ use skyward_net::wlan::{self, Joined, Link, Next, Power, Stage, Traffic, Wlan};
 use std::fs;
 use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Process, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -429,6 +429,7 @@ impl Station {
     }
 
     fn read_scan(&mut self) -> Result<()> {
+        let started = Instant::now();
         let r = self.running.as_mut().expect("scan results come from a supplicant running");
         let mut found = Vec::new();
         let mut first = 0;
@@ -439,6 +440,7 @@ impl Station {
             found.extend(page);
         }
         self.state.networks = wlan::networks(&found);
+        let _ = skyward_sys::kmsg(&format!("WLAN scan list: {} access points read in {} ms", found.len(), started.elapsed().as_millis()));
         r.found = found;
         Ok(())
     }
@@ -696,12 +698,24 @@ fn place(file: &Firmware) -> Result<()> {
     let bytes = match &file.partition {
         None => fs::read(&file.path).with_context(|| format!("read {}", file.path))?,
         Some(partition) => {
-            let at = Path::new(PARTITIONS).join(partition);
-            fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
-            skyward_block::mount::mount_ro(&Path::new(skyward_block::BY_NAME).join(partition), &at)?;
-            let read = fs::read(at.join(&file.path)).with_context(|| format!("read {} on {partition}", file.path));
-            skyward_block::mount::umount(&at)?;
-            read?
+            let device = Path::new(skyward_block::BY_NAME).join(partition);
+            let mounted = skyward_block::mount::points_of(skyward_block::devnum(&device)?)?;
+            if let Some(at) = mounted.first() {
+                fs::read(at.join(&file.path)).with_context(|| format!("read {} on {partition}", file.path))?
+            } else {
+                let at = Path::new(PARTITIONS).join(partition);
+                fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
+                skyward_block::mount::mount_ro(&device, &at)?;
+                let read = fs::read(at.join(&file.path)).with_context(|| format!("read {} on {partition}", file.path));
+                if let Err(error) = skyward_block::mount::umount(&at) {
+                    if error.downcast_ref::<std::io::Error>().and_then(|e| e.raw_os_error()) != Some(libc::EBUSY) {
+                        return Err(error);
+                    }
+                    // Keep a busy read-only source available for subsequent firmware reads.
+                    let _ = skyward_sys::kmsg(&format!("WLAN firmware source {} remains mounted read-only: busy", at.display()));
+                }
+                read?
+            }
         }
     };
     fs::write(&to, bytes).with_context(|| format!("write {}", to.display()))
@@ -728,24 +742,28 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
     if let Some(dir) = libraries {
         path.push(dir.to_string_lossy().into_owned());
     }
+    let log_path = home.join("supplicant.log");
+    let log = fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600)
+        .open(&log_path).with_context(|| format!("open {}", log_path.display()))?;
+    let errors = log.try_clone().context("share the supplicant log")?;
     let mut child = Process::new(&cfg.supplicant)
         .args(["-i", &cfg.interface, "-D", "nl80211", "-c"])
         .arg(&settings)
         .env("LD_LIBRARY_PATH", path.join(":"))
         .current_dir("/")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(errors))
         .spawn()
         .with_context(|| format!("start {}", cfg.supplicant))?;
     let until = Instant::now() + SOCKET_WAIT;
     while !socket.exists() {
         if let Some(status) = child.try_wait().context("look at wpa_supplicant")? {
-            bail!("wpa_supplicant ended as it started: {status}");
+            bail!("wpa_supplicant ended as it started: {status}; see {}", log_path.display());
         }
         if Instant::now() >= until {
             end(&mut child, None);
-            bail!("wpa_supplicant opened no control socket in {} seconds", SOCKET_WAIT.as_secs());
+            bail!("wpa_supplicant opened no control socket in {} seconds; see {}", SOCKET_WAIT.as_secs(), log_path.display());
         }
         thread::sleep(Duration::from_millis(100));
     }

@@ -16,6 +16,20 @@ const PROPERTIES: &str = "payload_properties.txt";
 const METADATA: &str = "META-INF/com/android/metadata";
 /// The install script of a zip that installs itself.
 pub const UPDATE_BINARY: &str = "META-INF/com/google/android/update-binary";
+const PIPA_CUST_UPDATE: &str = "META-INF/com/skyward/pipa-cust-update";
+
+/// This package updates boot and the cust payload without writing super.
+/// Like update-binary itself, the declaration is supplied by the chosen package.
+pub fn pipa_cust_update<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<bool> {
+    let Some(index) = zip.index_for_name(PIPA_CUST_UPDATE) else { return Ok(false) };
+    let mut entry = zip.by_index(index).context("open the pipa cust update declaration")?;
+    if entry.size() != b"pipa-cust-update-v1\n".len() as u64 {
+        return Ok(false);
+    }
+    let mut declaration = String::new();
+    entry.read_to_string(&mut declaration).context("read the pipa cust update declaration")?;
+    Ok(declaration == "pipa-cust-update-v1\n")
+}
 
 /// The most read to tell an image's kind: every header this recovery
 /// writes fits in one page.
@@ -231,6 +245,23 @@ METADATA_SIZE=1024
     #[test]
     fn a_full_package_for_this_phone_is_accepted() {
         assert_eq!(check(&update_with(METADATA_TEXT, PROPERTIES_TEXT), &phone()), Ok(()));
+    }
+
+    #[test]
+    fn only_the_exact_cust_update_declaration_keeps_system_mounts() {
+        for (value, expected) in [
+            (b"pipa-cust-update-v1\n".as_slice(), true),
+            (b"pipa-cust-update-v2\n".as_slice(), false),
+            (b"pipa-cust-update-v1\nextra".as_slice(), false),
+            (b"".as_slice(), false),
+        ] {
+            let bytes = zip_with(&[(PIPA_CUST_UPDATE, value, CompressionMethod::Deflated)]);
+            let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+            assert_eq!(pipa_cust_update(&mut zip).unwrap(), expected);
+        }
+        let bytes = zip_with(&[(UPDATE_BINARY, b"script", CompressionMethod::Stored)]);
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        assert!(!pipa_cust_update(&mut zip).unwrap());
     }
 
     #[test]
