@@ -55,9 +55,6 @@ jobs:
             out/pipa/skyward-pipa-boot.img
             out/pipa/skyward-pipa-cust-installer.zip
             out/pipa/SHA256SUMS
-            out/pipa/verification.json
-            out/pipa/routing-verification.json
-            out/pipa/build-info.json
           if-no-files-found: error
           retention-days: 14
 
@@ -87,7 +84,7 @@ jobs:
             printf '\n## 构建信息\n\n'
             printf -- '- 源码提交：`%s`\n' "$RELEASE_COMMIT"
             printf -- '- 构建分支：`%s`\n' "$RELEASE_BRANCH"
-            printf -- '- 校验值与输入基底详情见随附的 `SHA256SUMS` 和 `build-info.json`。\n'
+            printf -- '- 校验值详情见随附的 `SHA256SUMS` 和 `build-info.json`。\n'
           } >> out/pipa/RELEASE-NOTES.md
       - name: Publish release
         env:
@@ -104,7 +101,4 @@ jobs:
             out/pipa/skyward-pipa-cust-installer.zip \
             out/pipa/skyward-pipa-boot.img \
             out/pipa/SHA256SUMS \
-            out/pipa/verification.json \
-            out/pipa/routing-verification.json \
-            out/pipa/build-info.json \
             out/pipa/RELEASE-NOTES.md
