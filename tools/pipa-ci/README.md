@@ -72,3 +72,9 @@ remain errors.
 
 The output `routing-verification.json` confirms that the overlay uses the same
 recovery and loader as this build. Cloud validation does not replace device tests.
+
+For the unresolved logical-partition busy reports and the independent
+attribute-query reproduction, see [MOUNT-BUSY.md](MOUNT-BUSY.md).
+The startup investigation and partial pipa workaround are documented in
+[STARTUP-MOUNTS-20261110.md](STARTUP-MOUNTS-20261110.md); they do not yet establish
+that arbitrary ROM or kernel ZIPs can be installed.

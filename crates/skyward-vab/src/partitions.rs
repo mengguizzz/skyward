@@ -29,7 +29,18 @@ pub struct Mounts {
 /// goes under /mnt.
 pub fn mount_point(base: &str) -> PathBuf {
     let root = Path::new("/").join(base);
-    if base != "system" && fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir()) {
+    #[cfg(target_os = "android")]
+    let directory = || {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A path-stat leaks a mount reference on some retained pipa kernels.
+        // O_PATH + fstat also preserves the no-symlink directory check.
+        fs::OpenOptions::new().read(true)
+            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&root).and_then(|file| file.metadata()).is_ok_and(|m| m.is_dir())
+    };
+    #[cfg(not(target_os = "android"))]
+    let directory = || fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir());
+    if base != "system" && directory() {
         root
     } else {
         Path::new("/mnt").join(base)

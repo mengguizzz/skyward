@@ -59,9 +59,44 @@ mod sys {
     use std::fs;
     use std::io::ErrorKind;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt};
     use std::path::{Path, PathBuf};
     use std::ptr::null;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SOURCE_ALIASES: AtomicBool = AtomicBool::new(false);
+
+    /// Avoid init's /dev/block mount observer on affected recovery kernels.
+    /// Existing mounts and other processes are not changed.
+    pub fn enable_source_aliases() {
+        SOURCE_ALIASES.store(true, Ordering::Relaxed);
+    }
+
+    fn source(device: &Path) -> Result<CString> {
+        if !SOURCE_ALIASES.load(Ordering::Relaxed) {
+            return cstr(device);
+        }
+        let target = fs::canonicalize(device)
+            .with_context(|| format!("resolve mount source {}", device.display()))?;
+        let metadata = fs::metadata(&target)?;
+        if !metadata.file_type().is_block_device() {
+            return cstr(device);
+        }
+        let directory = Path::new("/skyward/run/block-sources");
+        fs::create_dir_all(directory)?;
+        let dev = metadata.rdev() as libc::dev_t;
+        let alias = directory.join(format!("{}-{}", libc::major(dev), libc::minor(dev)));
+        match symlink(&target, &alias) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                if fs::read_link(&alias)? != target {
+                    bail!("mount source alias {} points to another device", alias.display());
+                }
+            }
+            Err(e) => return Err(e).with_context(|| format!("create {}", alias.display())),
+        }
+        cstr(&alias)
+    }
 
     /// Where mounts wait while the mount point above them is covered or
     /// uncovered. It is on rootfs, which is private during the moves.
@@ -79,7 +114,7 @@ mod sys {
     /// the kernel accepts, and return its name. Only the kernel's answers for
     /// "not this filesystem" move on to the next one.
     pub fn mount_ro(device: &Path, target: &Path) -> Result<&'static str> {
-        let (src, dst) = (cstr(device)?, cstr(target)?);
+        let (src, dst) = (source(device)?, cstr(target)?);
         let mut refused = Vec::new();
         for fs in FILESYSTEMS {
             let ty = CString::new(fs).expect("filesystem names hold no NUL");
@@ -101,7 +136,7 @@ mod sys {
     /// phone's own table gives them: writable, unless they say otherwise.
     pub fn mount(device: &Path, target: &Path, filesystem: &str, options: &[String]) -> Result<()> {
         let (flags, own) = super::split_options(options);
-        let (src, dst) = (cstr(device)?, cstr(target)?);
+        let (src, dst) = (source(device)?, cstr(target)?);
         let ty = CString::new(filesystem).with_context(|| format!("{filesystem} holds a NUL"))?;
         let data = CString::new(own.as_str()).with_context(|| format!("{own} holds a NUL"))?;
         if unsafe { libc::mount(src.as_ptr(), dst.as_ptr(), ty.as_ptr(), flags as libc::c_ulong, data.as_ptr().cast()) } != 0 {
@@ -404,6 +439,8 @@ mod sys {
     use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
 
+    pub fn enable_source_aliases() {}
+
     pub fn mount_ro(device: &Path, _target: &Path) -> Result<&'static str> {
         bail!("this host does not mount {}", device.display())
     }
@@ -466,7 +503,7 @@ mod sys {
 }
 
 pub use sys::{
-    bind, holders, holding, is_mount_point, mount, mount_ids, mount_ro, mount_ro_over, points_of, remount_writable, umount,
+    bind, enable_source_aliases, holders, holding, is_mount_point, mount, mount_ids, mount_ro, mount_ro_over, points_of, remount_writable, umount,
     umount_detach, umount_detach_over, umount_over, visible,
 };
 

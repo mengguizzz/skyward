@@ -708,6 +708,11 @@ fn recovery() -> Result<()> {
             bcb::clear(&misc)?;
         }
         let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
+        #[cfg(target_os = "android")]
+        if cfg.device.codename == "pipa" {
+            skyward_block::mount::enable_source_aliases();
+            skyward_sys::kmsg("pipa block mounts use source aliases to avoid init mount-observer path-stat")?;
+        }
         skyward_sys::kmsg(&format!(
             "{} {} recovery up, misc command {:?} args {:?}, asking for {:?}",
             cfg.device.codename,
