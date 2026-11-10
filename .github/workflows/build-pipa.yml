@@ -55,6 +55,9 @@ jobs:
             out/pipa/skyward-pipa-boot.img
             out/pipa/skyward-pipa-cust-installer.zip
             out/pipa/SHA256SUMS
+            out/pipa/verification.json
+            out/pipa/routing-verification.json
+            out/pipa/build-info.json
           if-no-files-found: error
           retention-days: 14
 
