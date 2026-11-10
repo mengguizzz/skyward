@@ -70,3 +70,51 @@ jobs:
             out/pipa/build-info.json
           if-no-files-found: error
           retention-days: 14
+
+  publish:
+    name: Publish pipa prerelease
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: skyward-pipa-${{ github.sha }}
+          path: out/pipa
+      - name: Verify release assets
+        working-directory: out/pipa
+        run: sha256sum --check SHA256SUMS
+      - name: Prepare release notes
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+          RELEASE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cp tools/pipa-ci/RELEASE-NOTES.md out/pipa/RELEASE-NOTES.md
+          {
+            printf '\n## 构建信息\n\n'
+            printf -- '- 源码提交：`%s`\n' "$RELEASE_COMMIT"
+            printf -- '- 构建分支：`%s`\n' "$RELEASE_BRANCH"
+            printf -- '- 构建日志：%s\n' "$RELEASE_RUN_URL"
+            printf -- '- 校验值与输入基底详情见随附的 `SHA256SUMS` 和 `build-info.json`。\n'
+          } >> out/pipa/RELEASE-NOTES.md
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: pipa-build-${{ github.run_number }}-${{ github.run_attempt }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --target "$RELEASE_COMMIT" \
+            --title "Skyward for Xiaomi Pad 6 · $RELEASE_TAG" \
+            --prerelease \
+            --notes-file out/pipa/RELEASE-NOTES.md \
+            out/pipa/skyward-pipa-cust-installer.zip \
+            out/pipa/skyward-pipa-boot.img \
+            out/pipa/SHA256SUMS \
+            out/pipa/verification.json \
+            out/pipa/build-info.json \
+            out/pipa/RELEASE-NOTES.md
