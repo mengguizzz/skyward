@@ -1,16 +1,9 @@
 name: Build Xiaomi Pad 6
 
 on:
+  push:
+    branches: [pipa]
   workflow_dispatch:
-    inputs:
-      base_url:
-        description: "HTTPS URL of tested boot-fbboot.img (192 MiB)"
-        required: true
-        type: string
-      routing_url:
-        description: "HTTPS URL of pipa-routing.zip"
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -46,14 +39,11 @@ jobs:
           workspaces: |
             . -> target
             tools/pipa-cust-installer -> target/pipa-cust-installer
-      - name: Download fixed inputs
-        env:
-          BASE_URL: ${{ inputs.base_url }}
-          ROUTING_URL: ${{ inputs.routing_url }}
+      - name: Prepare bundled inputs
         run: |
           mkdir -p inputs
-          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' "$BASE_URL" -o inputs/boot-fbboot.img
-          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' "$ROUTING_URL" -o inputs/pipa-routing.zip
+          gzip --decompress --stdout tools/pipa-ci/inputs/boot-fbboot.img.gz > inputs/boot-fbboot.img
+          cp tools/pipa-ci/inputs/pipa-routing.zip inputs/pipa-routing.zip
           python3 tools/pipa-ci/package.py validate inputs/boot-fbboot.img inputs/pipa-routing.zip
       - name: Build and verify pipa outputs
         env:
