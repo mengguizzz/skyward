@@ -7,7 +7,7 @@
 | 文件 | 用途 |
 | --- | --- |
 | `skyward-pipa-cust-installer.zip` | 推荐安装包。在现有 TWRP 或 Skyward 中安装，给当前槽位的 boot 添加 Recovery 启动入口，并将 Skyward 写入 cust 的专用目录。 |
-| `skyward-pipa-boot.img` | 使用固定测试基底生成的独立 boot 镜像，供调试与验证使用。它不是基于使用者当前 boot 动态打补丁，不建议作为常规升级方式。 |
+| `skyward-pipa-boot.img` | 独立 boot 镜像，供**调试**与**验证**使用。它不是基于使用者当前 boot 动态打补丁，不建议作为常规升级方式，只适用于临时启动，比如fastboot boot skyward-pipa-boot.img 。 |
 
 ## 安装与升级
 
@@ -23,3 +23,16 @@
 
 - 备份保存在内部存储的 `Skyward-backups/<安装时间及槽位>/`，对应路径为 `/data/media/0/Skyward-backups/`。
 - 每次安装都会保存安装前的状态。请把首次安装前的备份另存到电脑，后续升级备份可能已经包含 Skyward。
+
+## 当前状态
+
+### 已修复：
+
+- 修复wifi
+- 支持data解密（可能只支持安卓17，目前只在A17上面测试过）
+- 等等
+
+### 已知问题：
+- 在线更新
+- 双系统
+- 你告诉我
