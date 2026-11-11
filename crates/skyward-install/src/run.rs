@@ -10,7 +10,6 @@ use crate::blockmap::BlockMap;
 use crate::ffs::{Endpoints, Shared, Usb};
 use crate::fuse::{self, Fault, LocalFile, Mount};
 use crate::image::{self, ImageKind};
-use crate::keep::Kept;
 use crate::ota::{self, Log, Status};
 use crate::package::{self, Build, Package, Phone, Update};
 use crate::script::{self, Bar, Request};
@@ -31,6 +30,27 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+enum Kept {
+    Recovery(crate::keep::Kept),
+    Pipa(crate::pipa_keep::Kept),
+}
+
+impl Kept {
+    fn wanted(&self, next: Slot) -> Result<Vec<Slot>> {
+        match self {
+            Self::Recovery(kept) => kept.wanted(next),
+            Self::Pipa(kept) => kept.wanted(next),
+        }
+    }
+
+    fn write(&self, slots: &[Slot], progress: &mut dyn FnMut(u64, u64)) -> Result<()> {
+        match self {
+            Self::Recovery(kept) => kept.write(slots, progress),
+            Self::Pipa(kept) => kept.write(slots, progress),
+        }
+    }
+}
 
 /// What runs right before update_engine or an install script starts
 /// writing. Either may write over the installed system's partitions, so
@@ -635,7 +655,11 @@ fn hold(ctx: &Context, current: Slot) -> Result<Option<Kept>> {
     if !ctx.options.keep {
         return Ok(None);
     }
-    let kept = Kept::hold(Path::new(skyward_block::BY_NAME), current).context("hold this recovery from its partition")?;
+    if prop("ro.product.device").as_deref() == Some("pipa") {
+        return Ok(Some(Kept::Pipa(crate::pipa_keep::Kept::hold(Path::new(skyward_block::BY_NAME))?)));
+    }
+    let kept = crate::keep::Kept::hold(Path::new(skyward_block::BY_NAME), current)
+        .context("hold this recovery from its partition")?.map(Kept::Recovery);
     if kept.is_none() {
         let _ = kmsg("install: the recovery partition does not hold Skyward, so there is none to keep");
     }
@@ -649,7 +673,16 @@ fn reflash(ctx: &Context, kept: &Kept, next: Result<Slot>) {
     let slots = match next.and_then(|next| kept.wanted(next)) {
         Ok(slots) if slots.is_empty() => return,
         Ok(slots) => slots,
-        Err(e) => return ctx.send(Event::Reflashed(Reflash::Failed(format!("{e:#}")))),
+        Err(e) => {
+            let message = format!("choose recovery retention targets: {e:#}");
+            let _ = kmsg(&format!("install: {message}"));
+            if matches!(kept, Kept::Pipa(_)) {
+                if let Ok(mut log) = OpenOptions::new().create(true).append(true).open(crate::pipa_keep::LOG) {
+                    let _ = writeln!(log, "{message}");
+                }
+            }
+            return ctx.send(Event::Reflashed(Reflash::Failed(message)));
+        }
     };
     let mut told: Option<Instant> = None;
     let written = kept.write(&slots, &mut |done, total| {
@@ -901,7 +934,17 @@ fn run_script(ctx: &mut Context, size: u64) -> Result<Done> {
     // the recovery of the slot that starts next, which a package that
     // installs to the other slot switches to.
     if let Some(kept) = &kept {
-        reflash(ctx, kept, skyward_vab::boot::next_slot().context("ask which slot starts next"));
+        // Failed scripts may have left a partial boot. Do not patch it automatically.
+        if matches!(kept, Kept::Pipa(_)) && !matches!(&ran, Ok((0, _))) {
+            ctx.send(Event::Reflashed(Reflash::Failed("Package failed; automatic Skyward retention was skipped".into())));
+        } else {
+            let next = if matches!(kept, Kept::Pipa(_)) {
+                crate::pipa_keep::next_slot()
+            } else {
+                skyward_vab::boot::next_slot()
+            };
+            reflash(ctx, kept, next.context("ask which slot starts next"));
+        }
     }
     let (code, wipe_cache) = ran?;
     Ok(Done::Script { code, wipe_cache })

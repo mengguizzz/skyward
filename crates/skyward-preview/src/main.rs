@@ -142,6 +142,10 @@ fn main() -> Result<()> {
         eprintln!("axis {tag}: {min}..{max} (default {def})");
     }
 
+    if args.iter().any(|a| a == "--tablet") {
+        return tablet_previews(&root, &out, &fonts);
+    }
+
     let cfg = DeviceConfig::load(root.join("devices/nezha.toml"))?;
     let (w, h) = (cfg.display.width, cfg.display.height);
     let ppd = cfg.display.density as f32 / 160.0;
@@ -1591,6 +1595,68 @@ fn calibrate(fonts: &Fonts, t: &Theme) -> Result<Canvas> {
         c.text(&face, "H", 1100.0, top + 105.0, 136.5, ink, None);
     }
     Ok(c)
+}
+
+fn tablet_previews(root: &Path, out: &Path, fonts: &Fonts) -> Result<()> {
+    let cfg = DeviceConfig::load(root.join("experimental/pipa/device.toml"))?;
+    let info = DeviceInfo {
+        model: "Xiaomi Pad 6".into(),
+        os_version: Some("OS2.0.20.0.UMZCNXM".into()),
+        android: Some("14".into()),
+        ..nezha(&cfg)
+    };
+    let (w, h) = (cfg.display.width, cfg.display.height);
+    let d = cfg.display.density as f32 / 160.0;
+    for dark in [false, true] {
+        for rotation in 0..4 {
+            let mut app = App::new(Screen::Home, w, h, d);
+            app.state.lang = lang();
+            app.state.dark = dark;
+            app.state.data = Data::Open;
+            app.state.rotation = rotation;
+            app.state.wlan = Some(joined(Joining::Connected(router_link())));
+            app.set_mounts(Ok(sample_mounts(&[])));
+            let mut physical = Canvas::new(w, h);
+            app.compose(&mut physical, fonts, &info, CLOCK, 1000);
+            if rotation % 2 == 1 {
+                // The device card is a real Home hit, not a parallel menu.
+                let mut t = app.theme();
+                t.m.w = (380.0 * d).min(h as f32 * 0.38).round() as u32;
+                let home = pages::home(&Ctx { t: &t, f: fonts, info: &info,
+                    state: &app.state, term: None, band: None });
+                let hit = home.hits.iter().find(|hit| hit.action == Action::Open(Screen::About)).unwrap();
+                let (x, y) = (hit.rect.x + hit.rect.w / 2.0, 44.0 * d + hit.rect.y + hit.rect.h / 2.0);
+                let (px, py) = if rotation == 1 { (y, h as f32 - 1.0 - x) } else { (w as f32 - 1.0 - y, x) };
+                app.touch(Touch::Down(px, py), fonts, 1100);
+                app.touch(Touch::Up, fonts, 1150);
+                anyhow::ensure!(app.screen() == Screen::About, "Home device card must open About in the detail pane");
+                for now in [1200, 1400, 1800, 2200] {
+                    app.tick(now);
+                    app.compose(&mut physical, fonts, &info, CLOCK, now);
+                }
+            }
+            let (lw, lh) = if rotation % 2 == 0 { (w, h) } else { (h, w) };
+            let mut upright = Canvas::new(lw, lh);
+            for py in 0..h {
+                for px in 0..w {
+                    let (x, y) = match rotation {
+                        1 => (h - 1 - py, px),
+                        2 => (w - 1 - px, h - 1 - py),
+                        3 => (py, w - 1 - px),
+                        _ => (px, py),
+                    };
+                    let src = ((py * w + px) * 4) as usize;
+                    let dst = ((y * lw + x) * 4) as usize;
+                    upright.data[dst..dst + 4].copy_from_slice(&physical.data[src..src + 4]);
+                }
+            }
+            let mode = if dark { "dark" } else { "light" };
+            let path = out.join(format!("pipa-{rotation}-{mode}.png"));
+            write_png(&path, &upright)?;
+            println!("wrote {}", path.display());
+        }
+    }
+    Ok(())
 }
 
 fn font_path() -> Result<PathBuf> {

@@ -96,7 +96,7 @@ pub fn open(answer: &str) -> Result<String> {
 }
 
 /// The newest system, and where its full package is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Release {
     pub version: String,
     /// The package's own name.
@@ -122,6 +122,21 @@ pub enum Unanswered {
     Offline(String),
     /// The server could not be asked, or its answer not read: why.
     Failed(String),
+}
+
+/// A pinned official full package, independent of a ported system's properties.
+pub fn bundled(codename: &str) -> Result<Option<Release>> {
+    if codename != "pipa" { return Ok(None); }
+    let rom: Release = serde_json::from_str(include_str!("pipa-rom.json"))?;
+    ensure!(rom.name.starts_with("pipa-ota_full-") && rom.name.ends_with(".zip") &&
+        !rom.name.contains('/') && !rom.name.contains('\\'), "invalid bundled ROM name");
+    ensure!(rom.md5.len() == 32 && rom.md5.bytes().all(|b| b.is_ascii_hexdigit()),
+        "invalid bundled ROM MD5");
+    ensure!(!rom.urls.is_empty() && rom.urls.iter().all(|url|
+        url.starts_with("https://") && url.ends_with(&format!("/{}/{}", rom.version, rom.name))),
+        "invalid bundled ROM mirrors");
+    ensure!(rom.length.is_some_and(|length| length > 0), "missing bundled ROM size");
+    Ok(Some(rom))
 }
 
 #[derive(Deserialize)]
@@ -196,6 +211,16 @@ pub fn ask(agent: &ureq::Agent, server: &str, installed: &Installed) -> Result<O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipa_catalog_has_full_digest_size_and_distinct_mirrors() {
+        let rom = bundled("pipa").unwrap().unwrap();
+        assert_eq!(rom.version, "OS2.0.20.0.UMZCNXM");
+        assert_eq!(rom.length, Some(5571398344));
+        assert_eq!(&rom.md5[..10], "cc45265ce4");
+        assert_eq!(rom.urls.iter().collect::<std::collections::BTreeSet<_>>().len(), 3);
+        assert!(bundled("ishtar").unwrap().is_none());
+    }
 
     fn thirteen_ultra() -> Installed {
         Installed { device: "ishtar".into(), version: "OS3.0.306.0.WMACNXM".into(), android: "16".into(), unlocked: true }

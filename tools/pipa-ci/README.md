@@ -19,6 +19,12 @@ Manual runs of **Build Xiaomi Pad 6** require no inputs or URLs.
    with the same current Skyward binary.
 6. Verify the published assets' hashes and publish with `RELEASE-NOTES.md`.
 
+The pipa build runs packaging twice: a non-recursive seed installer first,
+then the final boot/cust outputs with that installer embedded as a RAM resource.
+Both stages use the current compiled binary. Offline retention verification
+checks the nested archive and kernel preservation. See
+[KEEP-RECOVERY.md](KEEP-RECOVERY.md) for supported boot layouts and failure behavior.
+
 The device base and a hash-locked minimal vendor runtime are fixed binary inputs.
 The runtime archive contains 47 selected service/library/configuration files,
 not a complete vendor partition. The build verifies and embeds these files for
@@ -89,3 +95,8 @@ in [VENDOR-RUNTIME.md](VENDOR-RUNTIME.md). Local and workflow builds use the
 bundled runtime automatically; `PIPA_VENDOR_RUNTIME_DIR` overrides its source
 with another reviewed manifest directory. Updating Skyward does not require
 regenerating this archive unless its vendor dependencies change.
+
+Pipa's pinned China official ROM catalog, download mirrors and shared-storage
+file handling are documented in [ROM-DOWNLOAD.md](ROM-DOWNLOAD.md).
+
+See [TABLET-UI.md](TABLET-UI.md) for tablet layout, manual rotation, and preview checks.

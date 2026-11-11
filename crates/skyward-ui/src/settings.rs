@@ -29,6 +29,7 @@ const LOG_PLACES: [&str; 2] = ["temporary", "storage"];
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub rotation: u8,
     /// The language chosen on the language page, as a locale; none while
     /// the pages speak the one the system names.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -117,6 +118,7 @@ impl Settings {
     /// The settings `state` holds.
     pub fn of(state: &State) -> Settings {
         Settings {
+            rotation: state.rotation,
             language: state.language_chosen.then(|| state.lang.tag().to_string()),
             spoken: Some(state.lang.tag().to_string()),
             dark: state.dark,
@@ -165,6 +167,9 @@ impl Settings {
     /// a slider's place between its ends, a time, a time zone, a part or a
     /// place they offer. Any other stays as it is.
     pub fn apply(&self, state: &mut State) {
+        if self.rotation < 4 {
+            state.rotation = self.rotation;
+        }
         if let Some(lang) = self.chosen() {
             state.lang = lang;
             state.language_chosen = true;
@@ -299,6 +304,7 @@ mod tests {
     #[test]
     fn the_settings_go_round_through_their_file() {
         let state = State {
+            rotation: 3,
             lang: Lang::En,
             language_chosen: true,
             dark: true,

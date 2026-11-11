@@ -66,6 +66,9 @@ enum Cmd {
         /// Recovery-only stat compatibility library for retained pipa kernels.
         #[arg(long, requires = "vendor_runtime")]
         stat_compat: Option<PathBuf>,
+        /// Non-recursive pipa installer retained in RAM for post-flash repair.
+        #[arg(long, requires = "experimental_boot")]
+        reinstall_zip: Option<PathBuf>,
         /// Skyward built for the device (aarch64-linux-android).
         #[arg(long)]
         binary: PathBuf,
@@ -124,7 +127,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, experimental_boot, kernel_arg, functionfs_mtp, vendor_runtime, vendor_launcher, stat_compat, binary, system_init, config, font, mono, mono_license, out } => {
+        Cmd::Recovery { stock, experimental_boot, kernel_arg, functionfs_mtp, vendor_runtime, vendor_launcher, stat_compat, reinstall_zip, binary, system_init, config, font, mono, mono_license, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
             if let Some(arg) = kernel_arg {
@@ -140,6 +143,15 @@ fn main() -> Result<()> {
             }
             let read = |p: &PathBuf| std::fs::read(p).with_context(|| format!("read {}", p.display()));
             let profile = skyward_config::DeviceConfig::load(&config)?;
+            if let Some(zip) = reinstall_zip {
+                ensure!(profile.device.codename == "pipa", "reinstallation is only supported on pipa");
+                let bytes = read(&zip)?;
+                ensure!(bytes.starts_with(b"PK\x03\x04") && bytes.len() <= 128 * 1024 * 1024,
+                    "invalid reinstall ZIP");
+                rd.add("skyward/reinstall/installer.sha256", 0o644,
+                    format!("{:x}\n", Sha256::digest(&bytes)).into_bytes())?;
+                rd.add("skyward/reinstall/installer.zip", 0o644, bytes)?;
+            }
             rd.replace(paths::RECOVERY, read(&binary)?)?;
             // Install scripts look for the commands a stock recovery lacks
             // among its programs, and its unzip there too, a link to ziptool

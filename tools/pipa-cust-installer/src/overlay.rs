@@ -14,6 +14,14 @@ pub struct Record {
 }
 
 impl Record {
+    pub fn matches(&self, other: &Self) -> bool {
+        // Cpio repackers normalize symlink rwx bits; targets and owners still matter.
+        let symlink = self.mode & 0o170000 == 0o120000 &&
+            other.mode & 0o170000 == 0o120000;
+        self.hash == other.hash && self.uid == other.uid && self.gid == other.gid &&
+            (self.mode == other.mode || (symlink && self.mode & !0o777 == other.mode & !0o777))
+    }
+
     pub fn of(entry: &Entry) -> Self {
         Self {
             hash: digest(&entry.data),
@@ -71,5 +79,17 @@ mod tests {
         assert!(parse_manifest(&(row.clone() + &row)).is_err());
         assert!(parse_manifest(&row.replace("system/bin/recovery", "../init")).is_err());
         assert!(parse_manifest("").is_err());
+    }
+
+    #[test]
+    fn symlink_permission_normalization_keeps_target_type_and_ownership_checks() {
+        let original = Record { hash: digest(b"/firmware"), mode: 0o120755, uid: 0, gid: 0 };
+        let normalized = Record { hash: digest(b"/firmware"), mode: 0o120777, uid: 0, gid: 0 };
+        assert!(original.matches(&normalized));
+        assert!(!original.matches(&Record { hash: digest(b"/firmware"), mode: 0o120777, uid: 1, gid: 0 }));
+        assert!(!original.matches(&Record { hash: digest(b"/other"), ..normalized }));
+        let regular = Record { hash: digest(b"/firmware"), mode: 0o100755, uid: 0, gid: 0 };
+        assert!(!original.matches(&regular));
+        assert!(!regular.matches(&Record { hash: digest(b"/firmware"), mode: 0o100777, uid: 0, gid: 0 }));
     }
 }

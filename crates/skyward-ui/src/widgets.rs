@@ -2436,6 +2436,29 @@ pub fn output_row(c: &mut Canvas, t: &Theme, f: &Fonts, lines: &[String], i: usi
 /// ring and an accent caption. The rows are the light and the dark choice.
 pub fn theme_picker(c: &mut Canvas, t: &Theme, f: &Fonts, l: Lang, top: f32) -> Block {
     let m = &t.m;
+    if m.tablet {
+        let width = m.w as f32 - 2.0 * m.margin;
+        let height = m.dp(48.0);
+        c.fill_round_rect(m.margin, top, width, height, m.dp(8.0), t.pal.search);
+        let mut rows = Vec::new();
+        for (i, (label, dark)) in [
+            (l.pick(["浅色模式", "淺色模式", "Light mode"]), false),
+            (l.pick(["深色模式", "深色模式", "Dark mode"]), true),
+        ].into_iter().enumerate() {
+            let r = Rect::new(m.margin + width / 2.0 * i as f32, top, width / 2.0, height);
+            let on = t.dark == dark;
+            if on {
+                c.fill_round_rect(r.x + m.dp(3.0), r.y + m.dp(3.0), r.w - m.dp(6.0), r.h - m.dp(6.0), m.dp(6.0), t.pal.card);
+            }
+            let px = m.dp(16.0);
+            let text_width = c.text_width(&f.heading, label, px);
+            let (ink_top, ink_bottom) = f.heading.ink(px);
+            c.text(&f.heading, label, r.x + (r.w - text_width) / 2.0, r.y + (r.h - ink_top - ink_bottom) / 2.0,
+                px, if on { t.pal.accent } else { t.pal.text }, Some(r.w - m.dp(16.0)));
+            rows.push(r);
+        }
+        return Block { bottom: top + height, rows };
+    }
     let gap = m.dp(4.0);
     let slot_w = (m.w as f32 - m.margin * 2.0 - gap) / 2.0;
     let (ring, inset) = (m.dp(3.0), m.dp(6.0));

@@ -88,6 +88,7 @@ def main():
     parser.add_argument("--vendor-runtime", type=Path)
     parser.add_argument("--vendor-launcher", type=Path)
     parser.add_argument("--stat-compat", type=Path)
+    parser.add_argument("--reinstall-zip", type=Path)
     args = parser.parse_args()
     source, source_kernel, source_rd = boot(args.base)
     image, kernel, ramdisk = boot(args.image)
@@ -102,6 +103,13 @@ def main():
         expected_cmdline = text.ljust(1536, b"\0")
     check(expected_cmdline == image[44:1580], "unexpected kernel command line change")
     old, new = entries(source_rd), entries(ramdisk)
+    if args.reinstall_zip:
+        archive = args.reinstall_zip.read_bytes()
+        check(new["skyward/reinstall/installer.zip"][1] == archive, "reinstall ZIP mismatch")
+        check(new["skyward/reinstall/installer.sha256"][1] ==
+              (hashlib.sha256(archive).hexdigest() + "\n").encode(), "reinstall digest mismatch")
+        for path in ("skyward/reinstall/installer.zip", "skyward/reinstall/installer.sha256"):
+            check(new[path][0][:3] == (0o100644, 0, 0), "reinstall resource metadata mismatch")
     allowed = {
         "system/bin/recovery", "system/bin/7za", "system/bin/avbctl",
         "system/bin/resetprop", "system/bin/unzip", "system/bin/zstd",

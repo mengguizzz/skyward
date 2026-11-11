@@ -48,6 +48,10 @@ RUSTFLAGS="-C target-feature=+crt-static" cargo build --locked --release \
     --manifest-path tools/pipa-cust-installer/Cargo.toml \
     --target aarch64-linux-android --target-dir "$root_target/pipa-cust-installer" \
     --bin boot-patcher --bin recovery-loader --bin cust-readonly
+build_outputs() {
+    local destination="$1"
+    shift
+    mkdir -p "$destination"
 "$root_target/release/skyward-pack" recovery --experimental-boot \
     --kernel-arg cnss2.disable_nv_mac=1 --functionfs-mtp \
     --stock "$base" --binary "$root_target/aarch64-linux-android/release/skyward" \
@@ -55,12 +59,17 @@ RUSTFLAGS="-C target-feature=+crt-static" cargo build --locked --release \
     --system-init "$root_target/system-init/aarch64-linux-android/release/system-init" \
     --config experimental/pipa/device.toml \
     --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
-    --mono-license resources/fonts/KirkMono-OFL.txt --out "$out/skyward-pipa-boot.img"
-python3 experimental/pipa/verify_image.py "$base" "$out/skyward-pipa-boot.img" \
+    --mono-license resources/fonts/KirkMono-OFL.txt "$@" --out "$destination/skyward-pipa-boot.img"
+python3 experimental/pipa/verify_image.py "$base" "$destination/skyward-pipa-boot.img" \
     --kernel-arg cnss2.disable_nv_mac=1 --functionfs-mtp \
     "${runtime_args[@]}" \
     --binary "$root_target/aarch64-linux-android/release/skyward" \
-    --config experimental/pipa/device.toml --report "$out/verification.json"
-"$root_target/release/make-installer-data" "$base" "$out/skyward-pipa-boot.img" \
-    "$root_target/pipa-cust-installer/aarch64-linux-android/release/recovery-loader" "$out/routing-data"
-python3 tools/pipa-ci/package.py package "$base" "$out/routing-data" "$root_target" "$out"
+    --config experimental/pipa/device.toml "$@" --report "$destination/verification.json"
+"$root_target/release/make-installer-data" "$base" "$destination/skyward-pipa-boot.img" \
+    "$root_target/pipa-cust-installer/aarch64-linux-android/release/recovery-loader" "$destination/routing-data"
+python3 tools/pipa-ci/package.py package "$base" "$destination/routing-data" "$root_target" "$destination"
+}
+# The inner installer has no embedded copy of itself; both stages use the same binary.
+build_outputs "$out/reinstall-seed"
+build_outputs "$out" --reinstall-zip "$out/reinstall-seed/skyward-pipa-cust-installer.zip"
+python3 tools/pipa-ci/verify_retention.py "$out" "$root_target/release/boot-patcher" "$base"

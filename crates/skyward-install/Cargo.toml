@@ -27,7 +27,7 @@ x509-cert = "0.2.5"
 zerocopy = { version = "0.8.63", features = ["derive"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 zstd = { version = "0.14.3", default-features = false }
+tempfile = "3.27.0"
 
 [dev-dependencies]
 skyward-bootimg = { path = "../skyward-bootimg" }
-tempfile = "3.27.0"

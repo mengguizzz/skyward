@@ -1,0 +1,60 @@
+# Xiaomi Pad 6 tablet UI
+
+The UI keeps the existing page renderer and recovery operations. On displays
+whose shortest side is at least 600 dp, a tablet shell adds a rotation control.
+Phones keep their existing viewport and touch handling.
+
+## Layout and rotation
+
+- Portrait uses a single page.
+- Landscape renders the actual portrait Home page on the left, including its
+  search field, device card, coloured icons and grouped entries. There is no
+  separately maintained menu. Home is rendered from the same live state.
+  Tapping an entry opens its page on the right; all subsequent nested pages
+  and Back actions stay on the right and retain the ordinary navigation stack.
+- A single status bar spans the whole display above both
+  columns. Detail pages do not draw their own status bar.
+- The Home pane and detail page scroll independently.
+- The rotation control in the centre of the status band cycles through four
+  clockwise quarter turns. There is no additional app toolbar above the panes.
+- The `rotation` setting is saved through the existing settings keeper.
+- Rotation is manual. Automatic rotation using the accelerometer is not
+  implemented; this does not start the vendor sensor service.
+- Framebuffer dimensions, display mode, refresh rate, and kernel are unchanged.
+  The composed canvas is rotated in software; touches use the inverse mapping.
+- Pages keep their state and navigation stack across rotation. In-progress
+  gestures and confirmation sliders are cancelled, and size-dependent drawing
+  caches are rebuilt. A running terminal receives its updated rows and columns.
+- Before reaching Home, startup unlock/rescue screens have no sidebar.
+- Sidebar navigation uses ordinary Back and page-entry handlers. Existing
+  restrictions on leaving active writes and unsaved editors remain in effect.
+
+## Source
+
+- `crates/skyward-ui/src/tablet.rs`: shell layout, rendering, transformed touches,
+  independent navigation scrolling, and guarded navigation.
+- `crates/skyward-ui/src/app.rs`: shell state, page composition entry points,
+  tablet metrics, and terminal resize effect.
+- `crates/skyward-ui/src/settings.rs`: backward-compatible rotation persistence.
+- `crates/skyward-ui/src/term.rs`, `crates/skyward/src/pty.rs`, and
+  `crates/skyward/src/ui.rs`: terminal and pseudo-terminal resize.
+- `crates/skyward-ui/src/icons.rs`: rotation icon in the existing icon system.
+- `crates/skyward-ui/src/theme.rs` and `widgets.rs`: tablet spacing, compact
+  headings, and fixed-height light/dark segmented selection.
+
+## Host verification
+
+```sh
+cargo test --locked -p skyward-ui
+cargo run --locked -p skyward-preview -- OUTPUT_DIR --tablet
+```
+
+The preview uses pipa's actual 1800 x 2880 panel and 400 dpi configuration.
+It renders all four orientations in both themes. Landscape previews navigate
+through the real Home device card using physical panel coordinates and assert
+that the About page opens on the right.
+PNG files are exported upright for inspection.
+
+Before calling a release hardware-tested, check rotation in both landscape
+directions, sidebar and page scrolling, password keyboard, swipe confirmations,
+screen off/on, terminal resizing, and settings persistence on the tablet.

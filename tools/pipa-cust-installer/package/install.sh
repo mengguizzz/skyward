@@ -11,11 +11,12 @@ ui() {
 }
 fail() { ui "ERROR: $*"; exit 1; }
 mode="${1:---check}"
-case "$mode" in --check|--install) ;; *) fail "Use --check or --install" ;; esac
+case "$mode" in --check|--install|--retain|--retain-check) ;; *) fail "Use --check, --install or --retain SLOT" ;; esac
 [ "$(id -u)" = 0 ] || fail "Root recovery required"
 [ "$(getprop ro.product.device)" = pipa ] || fail "Only Xiaomi Pad 6 pipa is supported"
 [ "$(getenforce)" = Permissive ] || fail "This build requires permissive recovery"
 slot="$(getprop ro.boot.slot_suffix)"
+case "$mode" in --retain*) slot="${2:-}" ;; esac
 case "$slot" in _a|_b) ;; *) fail "Cannot determine current slot" ;; esac
 boot="/dev/block/bootdevice/by-name/boot$slot"
 cust=/dev/block/bootdevice/by-name/cust
@@ -38,6 +39,7 @@ cust_mount_rw=0
 had_skyward=0
 existing_cust_mount=
 publish_backup() {
+    case "$mode" in --retain*) return 0 ;; esac
     [ -n "$backup" ] && [ -d "$backup" ] || return 0
     case "$backup" in /data/media/0/Skyward-backups/*) ;; *) return 1 ;; esac
     [ "$(readlink -f "$backup")" = "$backup" ] || return 1
@@ -79,12 +81,15 @@ clear_skyward() {
 }
 finish() {
     result=$?
+    rollback_failed=0
     trap - EXIT
     if [ "$committed" = 0 ] && [ -n "$backup" ]; then
         if [ "$boot_touched" = 1 ]; then
             ui "Restoring original boot after failure..."
-            dd if="$backup/boot.img" of="$boot" bs=1048576 conv=fsync || result=1
-            [ "$(sha256sum "$boot" | cut -d ' ' -f1)" = "$boot_hash" ] || result=1
+            dd if="$backup/boot.img" of="$boot" bs=1048576 conv=fsync ||
+                { result=1; rollback_failed=1; }
+            [ "$(sha256sum "$boot" | cut -d ' ' -f1)" = "$boot_hash" ] ||
+                { result=1; rollback_failed=1; }
         fi
         if [ "$cust_touched" = 1 ]; then
             ui "Restoring the previous Skyward directory after failure..."
@@ -103,13 +108,26 @@ finish() {
     if ! publish_backup; then
         ui "WARNING: backup permissions could not be normalized: $backup"
     fi
-    rm -rf "$work"
+    if [ "$rollback_failed" = 1 ]; then
+        ui "ERROR: boot rollback failed; RAM backup retained at $backup/boot.img"
+    else
+        rm -rf "$work"
+    fi
     exit "$result"
 }
 trap finish EXIT
 ui "Reading current boot and checking compatibility..."
 dd if="$boot" of="$work/original.img" bs=1048576 status=none
-"$here/tools/boot-patcher" "$work/original.img" "$here/data" "$work/patched.img" >"$work/patch.log" 2>&1 ||
+case "$mode" in --retain*)
+    [ -n "${SKYWARD_REINSTALL_ZIP:-}" ] && [ -f "$SKYWARD_REINSTALL_ZIP" ] ||
+        fail "RAM reinstall archive missing"
+    set -- "$SKYWARD_REINSTALL_ZIP"
+    ;;
+*)
+    set --
+    ;;
+esac
+"$here/tools/boot-patcher" "$work/original.img" "$here/data" "$work/patched.img" "$@" >"$work/patch.log" 2>&1 ||
     { cat "$work/patch.log"; fail "Unsupported or conflicting boot; no partitions changed"; }
 cat "$work/patch.log"
 if [ "$mode" = --check ]; then
@@ -132,6 +150,41 @@ while read -r source target filesystem options rest; do
         fi
     esac
 done </proc/mounts
+case "$mode" in --retain*)
+    if [ -n "$existing_cust_mount" ]; then
+        payload="$existing_cust_mount/skyward/prototype-v1"
+    else
+        mount -t ext4 -o ro,noload,nosuid,nodev,noexec "$cust" "$cust_mount"
+        mounted=1
+        payload="$cust_mount/skyward/prototype-v1"
+    fi
+    "$here/tools/recovery-loader" --verify "$payload" ||
+        fail "cust payload unavailable; boot unchanged"
+    cmp "$payload/manifest.txt" "$here/payload/manifest.txt" ||
+        fail "cust payload differs from this recovery; boot unchanged"
+    if [ "$mode" = --retain-check ]; then
+        ui "Recovery retention compatibility check passed. No partitions changed."
+        exit 0
+    fi
+    boot_hash="$(sha256sum "$work/original.img" | cut -d ' ' -f1)"
+    patched_hash="$(sha256sum "$work/patched.img" | cut -d ' ' -f1)"
+    if [ "$boot_hash" != "$patched_hash" ]; then
+        # Preserve the post-ROM boot in RAM so a failed write can be rolled back.
+        backup="$work/rollback"
+        mkdir "$backup"
+        cp "$work/original.img" "$backup/boot.img"
+        boot_touched=1
+        dd if="$work/patched.img" of="$boot" bs=1048576 conv=fsync status=none
+        [ "$(sha256sum "$boot" | cut -d ' ' -f1)" = "$patched_hash" ] ||
+            fail "Boot readback mismatch"
+    fi
+    committed=1
+    # RAM rollback files are private and must not be published into Android data.
+    backup=
+    ui "Recovery route retained in boot$slot; cust unchanged. No automatic reboot."
+    exit 0
+    ;;
+esac
 [ -d /data/media/0 ] && [ -w /data/media/0 ] || fail "Decrypt/mount data in recovery first"
 available="$(df -Pk /data/media/0 | tail -n 1 | awk '{print $4}')"
 case "$available" in ''|*[!0-9]*) fail "Cannot read data free space" ;; esac

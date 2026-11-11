@@ -10,6 +10,7 @@ pub mod commands;
 pub mod fuse;
 pub mod image;
 pub mod keep;
+pub mod pipa_keep;
 pub mod ota;
 pub mod package;
 pub mod script;

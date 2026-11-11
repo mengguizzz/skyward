@@ -82,6 +82,7 @@ pub struct Hero {
 /// converted at the panel's density.
 #[derive(Clone, Copy)]
 pub struct Metrics {
+    pub tablet: bool,
     pub w: u32,
     pub h: u32,
     pub px_per_dp: f32,
@@ -177,6 +178,7 @@ impl Theme {
 fn metrics(w: u32, h: u32, px_per_dp: f32) -> Metrics {
     let dp = |v: f32| v * px_per_dp;
     Metrics {
+        tablet: false,
         w,
         h,
         px_per_dp,

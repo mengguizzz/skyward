@@ -38,7 +38,7 @@ pub enum Task {
     Check { server: String, probe: String, installed: Installed },
     /// Download `release`'s full package to `path`; `server` is asked again
     /// for where it is when the addresses it gave have run out.
-    Download { server: String, installed: Installed, release: Release, path: PathBuf },
+    Download { server: String, installed: Option<Installed>, release: Release, path: PathBuf },
     /// Ask GitHub for Skyward's newest release and its zip for the phone
     /// `codename` names; where that fails, `probe` says whether the network
     /// is why.
@@ -129,13 +129,18 @@ impl Worker {
                     // it: once one is turned down, the server is asked again
                     // for where the package is.
                     Task::Download { server, installed, release, path } => {
+                        if let Err(error) = prepare_rom_download(&path) {
+                            tell(Event::Ended(End::Failed(Failure::Other(format!("{error:#}")))));
+                            return;
+                        }
                         let mut asked_again = false;
                         let mut refused = |a: &ureq::Agent| {
+                            let Some(installed) = installed.as_ref() else { return Again::Retry };
                             if asked_again {
                                 return Again::Retry;
                             }
                             asked_again = true;
-                            match release::ask(a, &server, &installed) {
+                            match release::ask(a, &server, installed) {
                                 Ok(Some(fresh)) if fresh.md5 == release.md5 => Again::From(fresh.urls),
                                 Ok(_) => Again::End(End::Failed(Failure::Changed)),
                                 Err(again) => {
@@ -222,6 +227,21 @@ impl Worker {
             a.shutdown();
         }
     }
+}
+
+fn prepare_rom_download(path: &Path) -> Result<()> {
+    use skyward_files::Ownership;
+    let directory = path.parent().context("ROM download has no directory")?;
+    skyward_files::make_folders(directory, Ownership::Shared)?;
+    let part = download::partial(path);
+    match std::fs::symlink_metadata(&part) {
+        Ok(metadata) => anyhow::ensure!(metadata.is_file(), "ROM partial is not a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            skyward_files::make_file(&part, Ownership::Shared)?;
+        }
+        Err(error) => return Err(error).context("inspect partial ROM download"),
+    }
+    Ok(())
 }
 
 impl Drop for Worker {

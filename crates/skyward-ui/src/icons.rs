@@ -15,6 +15,8 @@ use tiny_skia::{BlendMode, Color, FillRule, LineCap, LineJoin, Paint, PathBuilde
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
+    /// A tablet turning clockwise.
+    Rotate,
     /// An arrow pointing up, as the stock Settings' updater shows it.
     Install,
     /// Two sheets, the one behind with its corner turned, as the stock
@@ -346,9 +348,14 @@ const SYSTEMS: &[Part] = &[
     cut(Shape::Line("M14.4,20.2H18", 1.3)),
 ];
 
+const ROTATE: &[Part] = &[
+    add(Shape::Line("M5.5,12V23H16.5V12H5.5Z M8.5,20H13.5 M3.5,8C8.5,2 20.5,5 21.5,13 M17.5,10L21.5,14L24.5,10", 1.8)),
+];
+
 /// What `icon`'s glyph is drawn from, and at what share of its size.
 fn outline(icon: Icon) -> (&'static [Part], f32) {
     match icon {
+        Icon::Rotate => (ROTATE, 1.0),
         Icon::Install => (INSTALL, 1.0),
         Icon::Backup => (BACKUP, 1.0),
         Icon::Restore => (RESTORE, 1.0),
@@ -500,7 +507,8 @@ fn path(d: &str) -> tiny_skia::Path {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 22] = [
+    const ALL: [Icon; 23] = [
+        Icon::Rotate,
         Icon::Install,
         Icon::Backup,
         Icon::Restore,

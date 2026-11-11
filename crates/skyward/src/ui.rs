@@ -987,7 +987,7 @@ fn detach(services: Vec<Service>) -> Detach {
 /// on a phone that has them, and checks a zip's signature before its
 /// install script runs.
 fn install_options(app: &App) -> Options {
-    Options { keep: app.state.keep_recovery && app.state.recovery_partitions, signed: app.state.check_signature }
+    Options { keep: app.state.keep_recovery && (app.state.recovery_partitions || app.state.boot_reinstall), signed: app.state.check_signature }
 }
 
 /// How often the WLAN page scans while it shows.
@@ -1189,6 +1189,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let by_name = Path::new(skyward_block::BY_NAME);
     let both = |base: &str| -> Result<bool> { Ok(by_name.join(format!("{base}_a")).try_exists()? && by_name.join(format!("{base}_b")).try_exists()?) };
     app.state.recovery_partitions = both("recovery")?;
+    app.state.boot_reinstall = cfg.device.codename == "pipa" && skyward_install::pipa_keep::available();
     app.state.dual_boot = app.state.recovery_partitions && both("boot")? && both("init_boot")?;
     // The second system's work; the systems are read at once, for the home
     // page to name the one that starts, once a switch cut off before is
@@ -1368,6 +1369,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     };
     let mut scanned_at = Instant::now();
     app.state.update_server = cfg.update.is_some();
+    if let Some(release) = skyward_net::release::bundled(&cfg.device.codename)? {
+        app.state.pinned_rom = true;
+        let present = have(&app, &release);
+        app.update_checked(Ok(Some(release)), present);
+    }
     // Asking the update server, and downloading the full package.
     let mut checker: Option<updates::Worker> = None;
     let mut downloader: Option<updates::Worker> = None;
@@ -1655,11 +1661,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         bcb::clear(&misc)?;
                         kept = false;
                     }
-                    let (leaves, cache_after) = match &request.work {
+                    let (mut leaves, cache_after) = match &request.work {
                         Work::Sideload { auto_reboot } => (*auto_reboot, script_cache),
                         Work::Update(update) => (installed, script_cache || (installed && update.wipe_cache)),
                         _ => (false, script_cache),
                     };
+                    if matches!(app.state.reflash, Some(skyward_install::Reflash::Failed(_))) {
+                        leaves = false;
+                    }
                     if cache_after && !app.state.cache_partition {
                         skyward_sys::kmsg("the install asked for the cache partition to be erased, and the phone has none")?;
                     }
@@ -2200,6 +2209,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             }
                         }
                     }
+                    Effect::ResizeShell { rows, cols } => {
+                        if let Some(sh) = &shell {
+                            if let Err(e) = sh.resize(rows, cols) {
+                                app.report(&format!("{e:#}"), now);
+                            }
+                        }
+                    }
                     Effect::TermInput(bytes) => {
                         let sh = shell.as_mut().context("keys went to a shell that has ended")?;
                         if let Err(e) = sh.write(&bytes) {
@@ -2489,6 +2505,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // report when it cannot be read.
                     Effect::CheckUpdate => {
                         ensure!(checker.is_none(), "the update server is being asked already");
+                        if let Some(release) = skyward_net::release::bundled(&cfg.device.codename)? {
+                            let present = have(&app, &release);
+                            app.update_checked(Ok(Some(release)), present);
+                            continue;
+                        }
                         let server = cfg.update.as_ref().context("the phone's update server is not known")?.server.clone();
                         let probe = cfg.wlan.as_ref().context("the phone's WLAN is not brought up")?.probe.clone();
                         match installed(cfg, &info) {
@@ -2502,7 +2523,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         ensure!(downloader.is_none(), "the full package is being downloaded already");
                         let server = cfg.update.as_ref().context("the phone's update server is not known")?.server.clone();
                         let path = downloaded(&release);
-                        match installed(cfg, &info) {
+                        let identity = if skyward_net::release::bundled(&cfg.device.codename)?.is_some() {
+                            Ok(None)
+                        } else {
+                            installed(cfg, &info).map(Some)
+                        };
+                        match identity {
                             Ok(installed) => {
                                 let task = updates::Task::Download { server, installed, release, path };
                                 downloader = Some(updates::Worker::start(task, servers.clone())?);

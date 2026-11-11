@@ -927,15 +927,19 @@ pub fn install(cx: &Ctx) -> Frame {
     out.extend(hits(&signature.rows, &[Action::Toggle(Switch::Signature)]));
     let note = l.pick(["开启后，仅安装带有本机官方签名的刷机包。", "開啟後，僅安裝帶有本機官方簽章的刷機包。", "When on, only zips signed with this phone's official keys install."]);
     let mut y = widgets::footnote(&mut c, t, f, signature.bottom, note);
-    if cx.state.recovery_partitions {
+    if cx.state.recovery_partitions || cx.state.boot_reinstall {
         let row = Row::new(l.pick(["自动重新刷入 Skyward", "自動重新刷入 Skyward", "Flash Skyward again"])).trail(Trail::Switch(cx.state.keep_recovery));
         let options = widgets::list(&mut c, t, f, y + t.m.card_gap, &[row]);
         out.extend(hits(&options.rows, &[Action::Toggle(Switch::KeepRecovery)]));
-        let note = l.pick([
+        let note = if cx.state.boot_reinstall { l.pick([
+            "安装成功后，尝试将 Skyward 启动入口重新安装到兼容的 boot。",
+            "安裝成功後，嘗試將 Skyward 啟動入口重新安裝到相容的 boot。",
+            "After a successful install, restore Skyward on compatible boot images.",
+        ]) } else { l.pick([
             "开启后，安装系统更新或刷机包时被覆盖的 recovery 分区将重新刷入 Skyward。",
             "開啟後，安裝系統更新或刷機包時被覆寫的 recovery 分割區將重新刷入 Skyward。",
             "When on, Skyward goes back into the recovery partitions a system update or flashable zip writes over.",
-        ]);
+        ]) };
         y = widgets::footnote(&mut c, t, f, options.bottom, note);
     }
     Frame::new(t, fit(c, t, y), out, l.pick(["安装", "安裝", "Install"]), top)
@@ -2635,7 +2639,9 @@ fn online(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) -> f32 {
     };
     let newer = i.os_version.as_deref() != Some(release.version.as_str());
     let version = &release.version;
-    let title = if newer { tr!(l, "新版本 {version}", "新版本 {version}", "New version {version}") } else { l.pick(["已是最新版本", "已是最新版本", "Up to date"]).to_string() };
+    let title = if s.pinned_rom {
+        tr!(l, "国行官方版本 {version}", "國行官方版本 {version}", "China official ROM {version}")
+    } else if newer { tr!(l, "新版本 {version}", "新版本 {version}", "New version {version}") } else { l.pick(["已是最新版本", "已是最新版本", "Up to date"]).to_string() };
     let size = match release.length {
         Some(length) => fmt::file_size(length),
         None => fmt::package_size(&release.size),
@@ -2696,7 +2702,11 @@ fn online(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) -> f32 {
         "The full OTA package is saved in “/sdcard/{DOWNLOADS}”, and stays there after it's installed."
     );
     let points = [
-        l.pick(["安装系统更新不会删除用户数据，建议在安装前进行备份。", "安裝系統更新不會刪除使用者資料，建議在安裝前進行備份。", "Installing a system update deletes no user data. Backing up first is still wise."]),
+        if s.pinned_rom { l.pick([
+            "此包为 Android 14 国行官方完整包。安装前请确认与当前系统及数据兼容。",
+            "此包為 Android 14 國行官方完整包。安裝前請確認與目前系統及資料相容。",
+            "This is the Android 14 China official full package. Check system and data compatibility before installing.",
+        ]) } else { l.pick(["安装系统更新不会删除用户数据，建议在安装前进行备份。", "安裝系統更新不會刪除使用者資料，建議在安裝前進行備份。", "Installing a system update deletes no user data. Backing up first is still wise."]) },
         saved.as_str(),
         l.pick(["下载中断后可继续下载，已下载的部分会保留。", "下載中斷後可繼續下載，已下載的部分會保留。", "A download cut short can be resumed, keeping what was downloaded."]),
         l.pick([

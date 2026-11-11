@@ -29,6 +29,9 @@ use skyward_net::wlan::{Joined, Network, Power, Stage as Joining, Traffic, Wlan}
 use skyward_systems::{Overview, Who};
 use skyward_vab::{BootSlots, Hold, Slot, SnapshotState, Standing};
 
+#[path = "tablet.rs"]
+mod tablet;
+
 /// The pages of the recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -1575,6 +1578,8 @@ impl Frame {
 /// stands.
 #[derive(Clone, Debug, PartialEq)]
 pub struct State {
+    /// Clockwise quarter turns of the tablet UI relative to the panel.
+    pub rotation: u8,
     /// The language the pages speak.
     pub lang: Lang,
     /// The language was chosen on the language page, now or at an earlier
@@ -1618,6 +1623,8 @@ pub struct State {
     /// The phone keeps its recovery in a partition of each slot, which the
     /// install page then offers to keep Skyward in.
     pub recovery_partitions: bool,
+    /// Recovery can repair its boot/cust route from a staged installer.
+    pub boot_reinstall: bool,
     /// Skyward goes back into the recovery partitions an install writes
     /// over.
     pub keep_recovery: bool,
@@ -1740,6 +1747,7 @@ pub struct State {
     /// The phone maker's update server is known, and the update page asks
     /// it.
     pub update_server: bool,
+    pub pinned_rom: bool,
     pub check: Check,
     pub have: Have,
     /// Downloading the newest system's full package, or how that last
@@ -1755,6 +1763,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         State {
+            rotation: 0,
             lang: Lang::Hans,
             language_chosen: false,
             dark: false,
@@ -1777,6 +1786,7 @@ impl Default for State {
             script_output: Vec::new(),
             check_signature: false,
             recovery_partitions: false,
+            boot_reinstall: false,
             keep_recovery: true,
             reflash: None,
             mounts: Ok(Vec::new()),
@@ -1829,6 +1839,7 @@ impl Default for State {
             password: String::new(),
             show_password: false,
             update_server: false,
+            pinned_rom: false,
             check: Check::Idle,
             have: Have::Nothing,
             download: None,
@@ -2035,6 +2046,8 @@ pub enum Effect {
     /// the size [`App::term_size`] gives, telling of it with
     /// [`App::term_started`].
     StartShell(String),
+    /// Update both the terminal emulator and the running pseudo-terminal.
+    ResizeShell { rows: u16, cols: u16 },
     /// Have the terminal page's shell go to this folder if it waits for a
     /// command; one running a command is left to it, and [`App::report`]
     /// says so.
@@ -2588,6 +2601,7 @@ fn keyboard_strip(t: &Theme, frame: &Frame) -> (Canvas, i32) {
 }
 
 pub struct App {
+    tablet: tablet::Tablet,
     pub state: State,
     /// The pages open, the one shown last: each with how far it is
     /// scrolled and where the keys are on it.
@@ -2733,6 +2747,7 @@ pub struct App {
 impl App {
     pub fn new(start: Screen, w: u32, h: u32, px_per_dp: f32) -> Self {
         App {
+            tablet: tablet::Tablet::new(w, h, px_per_dp),
             state: State::default(),
             stack: vec![(start, 0.0, Focus::Unset)],
             frame: None,
@@ -2804,11 +2819,22 @@ impl App {
     }
 
     pub fn theme(&self) -> Theme {
-        if self.state.dark {
+        let mut theme = if self.state.dark {
             Theme::dark(self.w, self.h, self.px_per_dp)
         } else {
             Theme::light(self.w, self.h, self.px_per_dp)
+        };
+        if self.tablet.enabled {
+            let d = self.px_per_dp;
+            theme.m.tablet = true;
+            theme.m.margin = 24.0 * d;
+            theme.m.card_radius = 8.0 * d;
+            theme.m.title_px = 26.0 * d;
+            theme.m.back_cy = 31.7 * d;
+            theme.m.title_top = 60.0 * d;
+            theme.m.content_top = 102.0 * d;
         }
+        theme
     }
 
     pub fn screen(&self) -> Screen {
@@ -4223,7 +4249,7 @@ impl App {
     /// Draw what the panel shows now: the page, the charging screen over it
     /// while a cable has just gone in, both as dark as the content stands
     /// as the panel goes off or comes up.
-    pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
+    fn compose_content(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
         let charge = self.charging.as_ref().map_or(0.0, |c| c.shown.level(now));
         if charge < 1.0 {
             self.compose_page(out, f, info, clock, now);
@@ -4378,7 +4404,9 @@ impl App {
         }
         self.shown = Some(view);
 
-        widgets::status_bar(out, &t, f, &self.bar(clock, info), t.pal.status);
+        if !self.tablet.enabled {
+            widgets::status_bar(out, &t, f, &self.bar(clock, info), t.pal.status);
+        }
         if let Some((text, _)) = &self.toast {
             widgets::toast(out, &t, f, text);
         }
@@ -4648,7 +4676,9 @@ impl App {
         draw_faded(out, disc, 0.0, 0.0, t.pal.search, shown, blur);
         draw_faded(out, cross, 0.0, 0.0, t.pal.text, shown, blur);
         self.morph = Some(morph);
-        widgets::status_bar(out, &t, f, &self.bar(clock, info), t.pal.status);
+        if !self.tablet.enabled {
+            widgets::status_bar(out, &t, f, &self.bar(clock, info), t.pal.status);
+        }
         if let Some((text, _)) = &self.toast {
             widgets::toast(out, &t, f, text);
         }
@@ -5958,7 +5988,7 @@ impl App {
         Vec::new()
     }
 
-    pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
+    fn touch_content(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
         // A finger on the dark panel lights nothing, as on the phone's own
         // system, where the power key lights it.
         if !self.display_on {
@@ -9263,6 +9293,18 @@ mod tests {
         assert!(app.state.keep_recovery, "on until turned off");
         tap(&mut app, &f, &i, Action::Toggle(Switch::KeepRecovery));
         assert!(!app.state.keep_recovery);
+    }
+
+    #[test]
+    fn boot_reinstall_does_not_enable_recovery_partition_features() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Install, &f, &i);
+        app.state.boot_reinstall = true;
+        app.refresh();
+        assert!(app.frame(&f, &i).hits.iter()
+            .any(|h| h.action == Action::Toggle(Switch::KeepRecovery)));
+        assert!(!app.state.recovery_partitions);
+        assert!(!app.state.dual_boot);
     }
 
     #[test]
