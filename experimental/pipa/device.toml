@@ -69,10 +69,3 @@ probe = "http://connect.rom.miui.com/generate_204"
 # The update server the stock updater of the Chinese system asks.
 [update]
 server = "https://update.miui.com/updates/miotaV3.php"
-
-# The stock build the recovery is made on: the Chinese system's
-# OS2.0.20.0.UMZCNXM, whose full update package on the phone maker's own download
-# server holds the recovery partition the recovery is built on top of.
-[stock]
-version = "OS2.0.20.0.UMZCNXM"
-package = "https://bn.d.miui.com/OS2.0.20.0.UMZCNXM/pipa-ota_full-OS2.0.20.0.UMZCNXM-user-14.0-cc45265ce4.zip"
