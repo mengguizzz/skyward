@@ -19,7 +19,11 @@ Manual runs of **Build Xiaomi Pad 6** require no inputs or URLs.
    with the same current Skyward binary.
 6. Verify the published assets' hashes and publish with `RELEASE-NOTES.md`.
 
-Only the original device base is a fixed binary input. There is no checked-in
+The device base and a hash-locked minimal vendor runtime are fixed binary inputs.
+The runtime archive contains 47 selected service/library/configuration files,
+not a complete vendor partition. The build verifies and embeds these files for
+both boot and cust delivery. Launcher and compatibility code compile from source.
+There is no checked-in
 `pipa-routing.zip` or historical Skyward fallback.
 
 ## Local Build
@@ -73,8 +77,15 @@ remain errors.
 The output `routing-verification.json` confirms that the overlay uses the same
 recovery and loader as this build. Cloud validation does not replace device tests.
 
-For the unresolved logical-partition busy reports and the independent
+For historical logical-partition busy reports and the independent
 attribute-query reproduction, see [MOUNT-BUSY.md](MOUNT-BUSY.md).
 The startup investigation and partial pipa workaround are documented in
 [STARTUP-MOUNTS-20261110.md](STARTUP-MOUNTS-20261110.md); they do not yet establish
 that arbitrary ROM or kernel ZIPs can be installed.
+
+The current minimal runtime, metadata compatibility workaround, in-memory
+fstab snapshot, live v8 validation and remaining startup issue are documented
+in [VENDOR-RUNTIME.md](VENDOR-RUNTIME.md). Local and workflow builds use the
+bundled runtime automatically; `PIPA_VENDOR_RUNTIME_DIR` overrides its source
+with another reviewed manifest directory. Updating Skyward does not require
+regenerating this archive unless its vendor dependencies change.

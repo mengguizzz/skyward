@@ -57,6 +57,15 @@ enum Cmd {
         /// Replace a custom recovery's legacy MTP actions with Skyward FunctionFS.
         #[arg(long, requires = "experimental_boot")]
         functionfs_mtp: bool,
+        /// Explicitly selected pipa vendor files and their hashed manifest.
+        #[arg(long, requires_all = ["experimental_boot", "vendor_launcher", "stat_compat"])]
+        vendor_runtime: Option<PathBuf>,
+        /// Static namespace launcher built from tools/pipa-ci/vendor-runtime.c.
+        #[arg(long, requires = "vendor_runtime")]
+        vendor_launcher: Option<PathBuf>,
+        /// Recovery-only stat compatibility library for retained pipa kernels.
+        #[arg(long, requires = "vendor_runtime")]
+        stat_compat: Option<PathBuf>,
         /// Skyward built for the device (aarch64-linux-android).
         #[arg(long)]
         binary: PathBuf,
@@ -115,7 +124,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, experimental_boot, kernel_arg, functionfs_mtp, binary, system_init, config, font, mono, mono_license, out } => {
+        Cmd::Recovery { stock, experimental_boot, kernel_arg, functionfs_mtp, vendor_runtime, vendor_launcher, stat_compat, binary, system_init, config, font, mono, mono_license, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
             if let Some(arg) = kernel_arg {
@@ -147,6 +156,11 @@ fn main() -> Result<()> {
             rd.add(paths::FONT, 0o644, read(&font)?)?;
             rd.add(paths::MONO, 0o644, read(&mono)?)?;
             rd.add(paths::MONO_LICENSE, 0o644, read(&mono_license)?)?;
+            if let Some(runtime) = vendor_runtime {
+                ensure!(profile.device.codename == "pipa", "vendor runtime is only supported on pipa");
+                add_vendor_runtime(&mut rd, &runtime, &vendor_launcher.context("missing vendor launcher")?,
+                    &stat_compat.context("missing stat compatibility library")?)?;
+            }
             // A stock ramdisk may run logd without any scheduling profiles,
             // and logd stops as soon as it cannot find the one it asks for.
             if rd.find(paths::TASK_PROFILES).is_none() {
@@ -196,6 +210,88 @@ fn main() -> Result<()> {
             }
         }
     }
+}
+
+fn add_vendor_runtime(rd: &mut Ramdisk, root: &Path, launcher: &Path, stat_compat: &Path) -> Result<()> {
+    let bytes = std::fs::read(root.join("manifest.json"))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
+    ensure!(manifest["format"] == "pipa-vendor-runtime-v1", "unknown vendor runtime format");
+    let files = manifest["files"].as_array().context("runtime manifest files missing")?;
+    ensure!(!files.is_empty() && files.len() <= 256, "unexpected runtime file count");
+    let mut names = std::collections::BTreeSet::new();
+    let mut total = 0usize;
+    for file in files {
+        let path = file["path"].as_str().context("runtime path missing")?;
+        ensure!(!path.is_empty() && path.is_ascii()
+            && path.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+            && names.insert(path.to_owned()), "invalid or duplicate runtime path");
+        ensure!(path.starts_with("bin/") || path.starts_with("lib64/") || path.starts_with("etc/"),
+            "unexpected runtime path: {path}");
+        // Source files must be independent regular files, never links back to vendor.
+        let source = root.join(path);
+        let mut parent = root.to_path_buf();
+        for part in path.split('/') {
+            parent.push(part);
+            ensure!(!std::fs::symlink_metadata(&parent)?.file_type().is_symlink(),
+                "runtime source traverses a symlink: {path}");
+        }
+        ensure!(std::fs::symlink_metadata(&source)?.is_file(), "runtime source is not a file");
+        let data = std::fs::read(source)?;
+        total = total.checked_add(data.len()).context("runtime size overflow")?;
+        ensure!(total <= 64 * 1024 * 1024, "runtime exceeds 64 MiB limit");
+        ensure!(file["size"].as_u64() == Some(data.len() as u64)
+            && file["sha256"].as_str() == Some(format!("{:x}", Sha256::digest(&data)).as_str()),
+            "runtime digest or size mismatch: {path}");
+        let mode = file["mode"].as_u64().context("runtime mode missing")?;
+        ensure!(mode == 0o644 || mode == 0o755, "unsupported runtime mode: {path}");
+        rd.add(&format!("skyward/vendor-runtime/{path}"), mode as u32, data)?;
+    }
+    for required in ["bin/cnss-daemon", "bin/qrtr-ns", "bin/hw/wpa_supplicant",
+        "bin/hw/android.hardware.keymaster@4.0-service-qti",
+        "bin/hw/android.hardware.gatekeeper@1.0-service-qti",
+        "etc/wifi/WCNSS_qcom_cfg.ini", "etc/vintf/manifest/android.hardware.wifi.supplicant.xml"] {
+        ensure!(names.contains(required), "required runtime file missing: {required}");
+    }
+    rd.add("skyward/vendor-runtime/manifest.json", 0o644, bytes)?;
+    rd.link("skyward/vendor-runtime/firmware_mnt", "/firmware")?;
+    rd.add("system/bin/pipa-vendor-exec", 0o755, std::fs::read(launcher)?)?;
+    rd.add("system/lib64/libskyward-stat-compat.so", 0o644, std::fs::read(stat_compat)?)?;
+    let path = "init.recovery.qcom.rc";
+    let mut rules = String::from_utf8(rd.find(path).context("QCOM init rules missing")?.data.clone())?;
+    let libraries = "    export LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw\n";
+    ensure!(rules.matches(libraries).count() == 1 && !rules.contains("export LD_PRELOAD"),
+        "unexpected QCOM library environment");
+    rules = rules.replacen(libraries,
+        "    export LD_LIBRARY_PATH /system/lib64\n    export LD_PRELOAD /system/lib64/libskyward-stat-compat.so\n", 1);
+    let trigger = "on property:vendor.sys.listeners.registered=true\n";
+    ensure!(rules.matches(trigger).count() == 1, "unexpected secure service trigger");
+    rules = rules.replacen(trigger,
+        "on property:vendor.sys.listeners.registered=true && property:skyward.vendor-runtime.ready=1\n", 1);
+    let qsee_trigger = "on init\n    start vendor.qseecomd\n";
+    ensure!(rules.matches(qsee_trigger).count() == 1, "unexpected qsee startup trigger");
+    rules = rules.replacen(qsee_trigger,
+        "on property:skyward.vendor-runtime.ready=1\n    start vendor.qseecomd\n", 1);
+    let qsee_service = "service vendor.qseecomd /vendor/bin/qseecomd\n";
+    ensure!(rules.matches(qsee_service).count() == 1, "unexpected qsee service");
+    rules = rules.replacen(qsee_service,
+        "service vendor.qseecomd /system/bin/pipa-vendor-exec --ramdisk-security /vendor/bin/qseecomd\n", 1);
+    for (service, program) in [
+        ("keymaster-4-0", "/vendor/bin/hw/android.hardware.keymaster@4.0-service-qti"),
+        ("gatekeeper-1-0", "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti"),
+    ] {
+        let old = format!("service {service} {program}\n");
+        ensure!(rules.matches(&old).count() == 1, "unexpected {service} init route");
+        rules = rules.replacen(&old, &format!("service {service} /system/bin/pipa-vendor-exec {program}\n"), 1);
+    }
+    rd.replace(path, rules.into_bytes())?;
+    let path = "system/etc/init/hw/init.rc";
+    let mut rules = String::from_utf8(rd.find(path).context("core init rules missing")?.data.clone())?;
+    let libraries = "    export LD_LIBRARY_PATH /system/lib64:/vendor/lib64/hw\n";
+    ensure!(rules.matches(libraries).count() == 1 && !rules.contains("export LD_PRELOAD"),
+        "unexpected core library environment");
+    rules = rules.replacen(libraries, "    export LD_LIBRARY_PATH /system/lib64\n", 1);
+    rd.replace(path, rules.into_bytes())?;
+    Ok(())
 }
 
 fn append_kernel_arg(cmdline: &mut [u8], arg: &str) -> Result<()> {
@@ -350,6 +446,29 @@ fn list(image: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_manifest_refuses_path_escape_and_corrupt_files() {
+        let root = tempfile::tempdir().unwrap();
+        let mut rd = super::Ramdisk { entries: Vec::new() };
+        let launcher = root.path().join("launcher");
+        std::fs::write(&launcher, b"fixture").unwrap();
+        let manifest = |path: &str, digest: &str| serde_json::json!({
+            "format": "pipa-vendor-runtime-v1",
+            "files": [{"path": path, "mode": 420, "size": 4, "sha256": digest}]
+        });
+        let run = |rd: &mut super::Ramdisk, value: serde_json::Value| {
+            std::fs::write(root.path().join("manifest.json"), value.to_string()).unwrap();
+            super::add_vendor_runtime(rd, root.path(), &launcher, &launcher).unwrap_err().to_string()
+        };
+        assert!(run(&mut rd, manifest("../outside", "")).contains("invalid"));
+        std::fs::create_dir(root.path().join("etc")).unwrap();
+        std::fs::write(root.path().join("etc/config"), b"data").unwrap();
+        assert!(run(&mut rd, manifest("etc/config", &"0".repeat(64))).contains("digest"));
+        assert!(rd.entries.is_empty());
+        std::os::unix::fs::symlink("config", root.path().join("etc/alias")).unwrap();
+        assert!(run(&mut rd, manifest("etc/alias", "")).contains("symlink"));
+    }
+
     #[test]
     fn custom_usb_rules_keep_adb_and_fastboot_but_remove_legacy_mtp() {
         let input = "# keep license\r\non fs\r\n    mkdir /config/usb_gadget/g1/functions/mtp.gs0\r\n    mount functionfs mtp /dev/usb-ffs/mtp uid=1024\r\n    mount functionfs adb /dev/usb-ffs/adb uid=2000\r\non property:sys.usb.config=none\r\n    setprop sys.usb.ffs.mtp.ready 0\r\n    stop adbd\r\non property:sys.usb.config=mtp,adb && property:sys.usb.ffs.ready=1\r\n    symlink /config/usb_gadget/g1/functions/mtp.gs0 /config/f1\r\n    write /config/UDC controller\r\non property:sys.usb.config=fastboot\r\n    start fastbootd\r\n";

@@ -16,7 +16,7 @@ use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command as Process, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -696,7 +696,7 @@ fn place(file: &Firmware) -> Result<()> {
     let dir = to.parent().expect("a firmware file is in a folder");
     fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
     let bytes = match &file.partition {
-        None => fs::read(&file.path).with_context(|| format!("read {}", file.path))?,
+        None => fs::read(crate::vendor_runtime::file(&file.path)).with_context(|| format!("read {}", file.path))?,
         Some(partition) => {
             let device = Path::new(skyward_block::BY_NAME).join(partition);
             let mounted = skyward_block::mount::points_of(skyward_block::devnum(&device)?)?;
@@ -746,7 +746,7 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
     let log = fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600)
         .open(&log_path).with_context(|| format!("open {}", log_path.display()))?;
     let errors = log.try_clone().context("share the supplicant log")?;
-    let mut child = Process::new(&cfg.supplicant)
+    let mut child = crate::vendor_runtime::command(&cfg.supplicant)
         .args(["-i", &cfg.interface, "-D", "nl80211", "-c"])
         .arg(&settings)
         .env("LD_LIBRARY_PATH", path.join(":"))

@@ -3,6 +3,12 @@
   "rust": "1.99.1",
   "ndk": "r29",
   "android_api": 30,
+  "vendor_runtime": {
+    "size": 5056506,
+    "sha256": "fa40c02e4eb417dacb9cd2d201aed045d8828612b7d14f1559bd76f91be5c085",
+    "file_count": 47,
+    "files_size": 12479538
+  },
   "base": {
     "size": 201326592,
     "sha256": "d9fc1f2b625c7fda5a8d61bc57a6e9fb9e03288ffb374d59c32e9a84144c0257"

@@ -158,6 +158,9 @@ fn describe_hardware(wanted: &[String]) -> Result<String> {
 /// against and give the directory they are in. A phone whose partitions
 /// need no bundle has none to open.
 pub fn libraries() -> Result<Option<PathBuf>> {
+    if crate::vendor_runtime::enabled() {
+        return Ok(None);
+    }
     let Some(version) = skyward_sys::prop(VENDOR_INTERFACE) else { return Ok(None) };
     Ok(bundle(&format!("com.android.vndk.v{version}"))?.map(|at| at.join(BUNDLE_LIBS)))
 }
@@ -219,7 +222,12 @@ pub fn publish_descriptions(wanted: &[String], files: &[String]) -> Result<usize
         copied += 1;
         Ok(())
     };
-    for dir in DESCRIPTIONS {
+    let mut descriptions: Vec<&str> = DESCRIPTIONS.to_vec();
+    if crate::vendor_runtime::enabled() {
+        // Use the description matching the bundled supplicant even without a ROM.
+        descriptions = vec!["/skyward/vendor-runtime/etc/vintf/manifest"];
+    }
+    for dir in descriptions {
         let listing = match fs::read_dir(dir) {
             Ok(listing) => listing,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,

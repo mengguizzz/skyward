@@ -4,6 +4,11 @@ The pipa workflow uses this bundled file without download URLs:
 
 - `boot-fbboot.img.gz`: gzip-compressed tested boot image. Decompression must
   produce the exact 192 MiB image recorded in `../inputs.lock.json`.
+- `pipa-vendor-runtime.tar.gz`: the reviewed minimal runtime used by the v8
+  experiment. Archive hash, size and manifest totals are locked in
+  `../inputs.lock.json`; packing verifies each file against its manifest.
+  It contains service executables, libraries and generic configuration only,
+  not credentials, device calibration, encryption keys or userdata.
 
 The workflow decompresses the boot image and verifies it before building.
 The compressed boot is a regular Git file, not a Git LFS pointer.

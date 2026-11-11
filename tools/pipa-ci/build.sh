@@ -21,6 +21,20 @@ mkdir -p "$CARGO_TARGET_DIR"
 export CARGO_TARGET_DIR="$(realpath "$CARGO_TARGET_DIR")"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 root_target="$CARGO_TARGET_DIR"
+runtime_args=()
+if [[ -z "${PIPA_VENDOR_RUNTIME_DIR:-}" ]]; then
+    python3 tools/pipa-ci/runtime_input.py "$out/vendor-runtime"
+    export PIPA_VENDOR_RUNTIME_DIR="$out/vendor-runtime"
+fi
+if [[ -n "${PIPA_VENDOR_RUNTIME_DIR:-}" ]]; then
+    "$CC_aarch64_linux_android" -static -O2 -Wall -Wextra \
+        tools/pipa-ci/vendor-runtime.c -o "$out/pipa-vendor-exec"
+    "$CC_aarch64_linux_android" -shared -fPIC -O2 -Wall -Wextra \
+        tools/pipa-ci/stat-compat.c -o "$out/libskyward-stat-compat.so"
+    runtime_args=(--vendor-runtime "$(realpath "$PIPA_VENDOR_RUNTIME_DIR")"
+        --vendor-launcher "$out/pipa-vendor-exec"
+        --stat-compat "$out/libskyward-stat-compat.so")
+fi
 cargo test --locked --manifest-path tools/pipa-cust-installer/Cargo.toml \
     --bin boot-patcher --bin make-installer-data
 cargo build --locked --release --manifest-path tools/pipa-cust-installer/Cargo.toml \
@@ -37,12 +51,14 @@ RUSTFLAGS="-C target-feature=+crt-static" cargo build --locked --release \
 "$root_target/release/skyward-pack" recovery --experimental-boot \
     --kernel-arg cnss2.disable_nv_mac=1 --functionfs-mtp \
     --stock "$base" --binary "$root_target/aarch64-linux-android/release/skyward" \
+    "${runtime_args[@]}" \
     --system-init "$root_target/system-init/aarch64-linux-android/release/system-init" \
     --config experimental/pipa/device.toml \
     --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
     --mono-license resources/fonts/KirkMono-OFL.txt --out "$out/skyward-pipa-boot.img"
 python3 experimental/pipa/verify_image.py "$base" "$out/skyward-pipa-boot.img" \
     --kernel-arg cnss2.disable_nv_mac=1 --functionfs-mtp \
+    "${runtime_args[@]}" \
     --binary "$root_target/aarch64-linux-android/release/skyward" \
     --config experimental/pipa/device.toml --report "$out/verification.json"
 "$root_target/release/make-installer-data" "$base" "$out/skyward-pipa-boot.img" \

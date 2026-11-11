@@ -85,6 +85,9 @@ def main():
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--kernel-arg")
     parser.add_argument("--functionfs-mtp", action="store_true")
+    parser.add_argument("--vendor-runtime", type=Path)
+    parser.add_argument("--vendor-launcher", type=Path)
+    parser.add_argument("--stat-compat", type=Path)
     args = parser.parse_args()
     source, source_kernel, source_rd = boot(args.base)
     image, kernel, ramdisk = boot(args.image)
@@ -106,9 +109,81 @@ def main():
     }
     if args.functionfs_mtp:
         allowed.add("init.recovery.usb.rc")
+    if args.vendor_runtime:
+        allowed.add("init.recovery.qcom.rc")
+        allowed.add("system/etc/init/hw/init.rc")
     changed = sorted(name for name in old if new.get(name) != old[name])
     check(set(changed) <= allowed, f"unexpected ramdisk changes: {set(changed) - allowed}")
     check(set(old) <= set(new), "original ramdisk entries removed")
+    if args.vendor_runtime:
+        check(args.vendor_launcher is not None, "runtime launcher missing")
+        launcher = args.vendor_launcher.read_bytes()
+        check(new["system/bin/pipa-vendor-exec"][1] == launcher, "runtime launcher mismatch")
+        check(args.stat_compat is not None, "stat compatibility library missing")
+        compat = args.stat_compat.read_bytes()
+        metadata, contents = new["system/lib64/libskyward-stat-compat.so"]
+        check(contents == compat and metadata[:3] == (0o100644, 0, 0), "stat compatibility mismatch")
+        check(compat[:5] == b"\x7fELF\x02" and struct.unpack_from("<HH", compat, 16) == (3, 183),
+              "stat compatibility library is not AArch64 ET_DYN")
+        check(launcher[:5] == b"\x7fELF\x02"
+              and struct.unpack_from("<H", launcher, 18)[0] == 183,
+              "runtime launcher is not AArch64 ELF64")
+        manifest_bytes = (args.vendor_runtime / "manifest.json").read_bytes()
+        check(new["skyward/vendor-runtime/manifest.json"][1] == manifest_bytes,
+              "runtime manifest mismatch")
+        manifest = json.loads(manifest_bytes)
+        check(manifest["format"] == "pipa-vendor-runtime-v1", "runtime format mismatch")
+        expected_names = set()
+        for file in manifest["files"]:
+            name = "skyward/vendor-runtime/" + file["path"]
+            check(name not in expected_names, "duplicate runtime member")
+            expected_names.add(name)
+            metadata, content = new[name]
+            check(len(content) == file["size"]
+                  and hashlib.sha256(content).hexdigest() == file["sha256"],
+                  f"runtime content mismatch: {name}")
+            check(metadata[:3] == (0o100000 | file["mode"], 0, 0),
+                  f"runtime ownership/mode mismatch: {name}")
+        extras = {name for name, (metadata, _) in new.items()
+                  if name.startswith("skyward/vendor-runtime/")
+                  and metadata[0] & 0o170000 != 0o040000}
+        check(extras == expected_names | {
+            "skyward/vendor-runtime/manifest.json", "skyward/vendor-runtime/firmware_mnt"
+        }, "unlisted runtime files")
+        check(new["skyward/vendor-runtime/firmware_mnt"][1] == b"/firmware",
+              "runtime modem path mismatch")
+        expected_rules = old["init.recovery.qcom.rc"][1]
+        libraries = b"    export LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw\n"
+        check(expected_rules.count(libraries) == 1, "unexpected QCOM library environment")
+        expected_rules = expected_rules.replace(libraries,
+            b"    export LD_LIBRARY_PATH /system/lib64\n    export LD_PRELOAD /system/lib64/libskyward-stat-compat.so\n", 1)
+        trigger = b"on property:vendor.sys.listeners.registered=true\n"
+        check(expected_rules.count(trigger) == 1, "unexpected secure service trigger")
+        expected_rules = expected_rules.replace(trigger,
+            b"on property:vendor.sys.listeners.registered=true && property:skyward.vendor-runtime.ready=1\n", 1)
+        trigger = b"on init\n    start vendor.qseecomd\n"
+        check(expected_rules.count(trigger) == 1, "unexpected qsee trigger")
+        expected_rules = expected_rules.replace(trigger,
+            b"on property:skyward.vendor-runtime.ready=1\n    start vendor.qseecomd\n", 1)
+        service = b"service vendor.qseecomd /vendor/bin/qseecomd\n"
+        check(expected_rules.count(service) == 1, "unexpected qsee service")
+        expected_rules = expected_rules.replace(service,
+            b"service vendor.qseecomd /system/bin/pipa-vendor-exec --ramdisk-security /vendor/bin/qseecomd\n", 1)
+        for service, program in [
+            ("keymaster-4-0", "/vendor/bin/hw/android.hardware.keymaster@4.0-service-qti"),
+            ("gatekeeper-1-0", "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti"),
+        ]:
+            original = f"service {service} {program}\n".encode()
+            check(expected_rules.count(original) == 1, "unexpected original service")
+            expected_rules = expected_rules.replace(original,
+                f"service {service} /system/bin/pipa-vendor-exec {program}\n".encode(), 1)
+        check(new["init.recovery.qcom.rc"][1] == expected_rules,
+              "unexpected init vendor runtime changes")
+        libraries = b"    export LD_LIBRARY_PATH /system/lib64:/vendor/lib64/hw\n"
+        expected_rules = old["system/etc/init/hw/init.rc"][1]
+        check(expected_rules.count(libraries) == 1, "unexpected core library environment")
+        expected_rules = expected_rules.replace(libraries, b"    export LD_LIBRARY_PATH /system/lib64\n", 1)
+        check(new["system/etc/init/hw/init.rc"][1] == expected_rules, "unexpected core init changes")
     check(new["system/bin/recovery"][1] == args.binary.read_bytes(), "recovery binary mismatch")
     binary = new["system/bin/recovery"][1]
     check(binary[:5] == b"\x7fELF\x02" and struct.unpack_from("<H", binary, 18)[0] == 183, "recovery is not AArch64 ELF64")

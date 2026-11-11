@@ -41,6 +41,8 @@ mod updates;
 mod wipe;
 #[cfg(target_os = "android")]
 mod wlan;
+#[cfg(target_os = "android")]
+mod vendor_runtime;
 
 #[derive(Parser)]
 #[command(name = "skyward", version, about = "Skyward recovery")]
@@ -212,6 +214,10 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "android")]
+    if skyward_sys::prop("ro.product.device").as_deref() == Some("pipa") {
+        skyward_block::mount::enable_source_aliases();
+    }
     // init starts the recovery service by path with no arguments.
     let started_as = std::env::args_os().next().unwrap_or_default();
     let name = Path::new(&started_as).file_name().unwrap_or_default();
@@ -487,10 +493,24 @@ fn load_modules(cfg: &DeviceConfig, names: &[String]) -> Result<Vec<PathBuf>> {
 /// names, only those this phone's build of the hardware runs are started.
 #[cfg(target_os = "android")]
 fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
+    if vendor_runtime::enabled() {
+        skyward_block::fstab::preserve_tables()?;
+    }
     let nodes = skyward_sys::ueventd::apply()?;
     skyward_sys::kmsg(&format!("{nodes} device nodes given the owner their phone describes"))?;
-    let props = skyward_info::installed_props(slot)?;
-    adopt_installed_version(&props)?;
+    let props = match skyward_info::installed_props(slot) {
+        Ok(props) => props,
+        Err(e) if vendor_runtime::enabled() => {
+            skyward_sys::kmsg(&format!("bundled vendor runtime: installed properties unavailable: {e:#}"))?;
+            std::collections::HashMap::new()
+        }
+        Err(e) => return Err(e),
+    };
+    if vendor_runtime::enabled() && !BUILD_VERSION.iter().all(|name| props.contains_key(*name)) {
+        skyward_sys::kmsg("bundled vendor runtime: installed version unavailable; decryption compatibility is not assumed")?;
+    } else {
+        adopt_installed_version(&props)?;
+    }
     // Without logd the phone's own programs still run, and only what they
     // log is lost, so why it did not start goes to the kernel log.
     if let Some(logd) = &cfg.logd {
@@ -505,6 +525,14 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     std::fs::write(FIRMWARE_FALLBACK, "1").with_context(|| format!("write 1 to {FIRMWARE_FALLBACK}"))?;
     if let Some(firmware) = &cfg.firmware {
         mount_firmware(firmware)?;
+    }
+    if vendor_runtime::enabled() {
+        let target = Path::new("/etc/firmware/wlan/qca_cld/WCNSS_qcom_cfg.ini");
+        std::fs::create_dir_all(target.parent().expect("firmware parent"))?;
+        std::fs::copy(vendor_runtime::file("/vendor/etc/wifi/WCNSS_qcom_cfg.ini"), target)?;
+        // Init services must inherit the already-mounted independent firmware
+        // view and the adopted build properties before isolating themselves.
+        skyward_sys::set_prop("skyward.vendor-runtime.ready", "1")?;
     }
     for name in &cfg.partitions.mounted {
         let at = skyward_block::fstab::mount(name)?;
@@ -534,7 +562,7 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         let described = secure::publish_descriptions(&registering, &files)?;
         skyward_sys::kmsg(&format!("{described} of the phone's own service descriptions published"))?;
     }
-    let libraries = secure::libraries()?;
+    let libraries = if vendor_runtime::enabled() { None } else { secure::libraries()? };
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
     }
@@ -636,6 +664,15 @@ fn mount_firmware(firmware: &skyward_config::FirmwarePartition) -> Result<()> {
     let shown = Path::new(FIRMWARE_SHOWN);
     if skyward_block::mount::is_mount_point(shown)? {
         return Ok(());
+    }
+    if vendor_runtime::enabled() {
+        let entry = skyward_block::fstab::partition(partition)?
+            .with_context(|| format!("the phone's own table does not mount {partition}"))?;
+        let options = firmware.mount_options.as_ref().unwrap_or(&entry.options);
+        std::fs::create_dir_all(shown).with_context(|| format!("make {}", shown.display()))?;
+        skyward_block::mount::mount(
+            Path::new(&skyward_block::fstab::device(&entry)?), shown, &entry.filesystem, options)?;
+        return skyward_sys::kmsg(&format!("{partition} is mounted independently on {}", shown.display()));
     }
     let at = if let Some(options) = &firmware.mount_options {
         let entry = skyward_block::fstab::partition(partition)?
@@ -799,7 +836,14 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
                 skyward_sys::kmsg(&format!("devices not brought up: {e:#}"))?;
             }
         }
-        Err(e) => skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?,
+        Err(e) => {
+            skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?;
+            if vendor_runtime::enabled() {
+                if let Err(e) = bring_up(cfg, slot) {
+                    skyward_sys::kmsg(&format!("bundled devices not brought up: {e:#}"))?;
+                }
+            }
+        }
     }
     Ok(())
 }

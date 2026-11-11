@@ -48,18 +48,49 @@ pub struct Visible {
     pub filesystem: String,
 }
 
-/// Follow a path without issuing path-stat, which leaks mount references
-/// on some Android recovery kernels. O_PATH requires no file read access.
-pub fn path_metadata(path: &std::path::Path) -> std::io::Result<std::fs::Metadata> {
+/// Only the attributes needed to identify mounted files and directories.
+pub struct PathMetadata {
+    device: u64,
+    mode: u32,
+}
+
+impl PathMetadata {
+    pub fn dev(&self) -> u64 { self.device }
+    pub fn is_dir(&self) -> bool { self.mode & 0o170000 == 0o040000 }
+    pub fn is_file(&self) -> bool { self.mode & 0o170000 == 0o100000 }
+}
+
+/// Follow a path without path-stat, including fstatat(AT_EMPTY_PATH), which
+/// newer Rust versions may use even for File::metadata on Android.
+pub fn path_metadata(path: &std::path::Path) -> std::io::Result<PathMetadata> {
+    path_attributes(path, false)
+}
+
+/// Inspect the final path component without following a symbolic link.
+pub fn path_symlink_metadata(path: &std::path::Path) -> std::io::Result<PathMetadata> {
+    path_attributes(path, true)
+}
+
+fn path_attributes(path: &std::path::Path, nofollow: bool) -> std::io::Result<PathMetadata> {
     #[cfg(target_os = "android")]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new().read(true)
-            .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
-            .open(path)?.metadata()
+        use std::os::fd::AsRawFd;
+        let file = std::fs::OpenOptions::new().read(true)
+            .custom_flags(libc::O_PATH | libc::O_CLOEXEC | if nofollow { libc::O_NOFOLLOW } else { 0 })
+            .open(path)?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(file.as_raw_fd(), &mut stat) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(PathMetadata { device: stat.st_dev as u64, mode: stat.st_mode as u32 })
     }
     #[cfg(not(target_os = "android"))]
-    std::fs::metadata(path)
+    {
+        use std::os::unix::fs::MetadataExt;
+        let stat = if nofollow { std::fs::symlink_metadata(path)? } else { std::fs::metadata(path)? };
+        Ok(PathMetadata { device: stat.dev(), mode: stat.mode() })
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -524,6 +555,29 @@ pub use sys::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descriptor_attributes_preserve_file_types_and_symlink_behavior() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("skyward-attributes-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("file");
+        let link = root.join("link");
+        std::fs::write(&file, "attributes").unwrap();
+        symlink(&file, &link).unwrap();
+        let directory = path_metadata(&root).unwrap();
+        assert!(directory.is_dir());
+        assert!(path_metadata(&file).unwrap().is_file());
+        assert!(path_metadata(&link).unwrap().is_file());
+        let unlinked = path_symlink_metadata(&link).unwrap();
+        assert!(!unlinked.is_file() && !unlinked.is_dir());
+        assert_eq!(directory.dev(), unlinked.dev());
+        assert_eq!(path_metadata(&root.join("missing")).err().unwrap().kind(),
+            std::io::ErrorKind::NotFound);
+        std::fs::remove_file(link).unwrap();
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn the_kernels_flags_are_taken_out_of_a_phones_mount_options() {

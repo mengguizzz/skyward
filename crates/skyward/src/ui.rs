@@ -924,7 +924,8 @@ fn read_mounts(services: &[Service]) -> Result<Vec<skyward_ui::app::MountRow>> {
         let mut using = BTreeSet::new();
         if let Some(m) = mounted {
             using.extend(holders.get(&skyward_block::devnum(&m.device)?).into_iter().flatten().cloned());
-            for s in services.iter().filter(|s| !s.oneshot && s.uses(&point)) {
+            for s in services.iter().filter(|s| !s.oneshot && s.uses(&point)
+                && !crate::vendor_runtime::routes(&s.path)) {
                 let program = Path::new(&s.path).file_name().with_context(|| format!("{} names no program", s.path))?;
                 using.insert(program.to_string_lossy().into_owned());
             }

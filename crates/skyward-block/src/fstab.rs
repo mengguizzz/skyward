@@ -7,6 +7,30 @@ use std::path::{Path, PathBuf};
 /// Where the phone's own partitions keep the table.
 pub const FILES: [&str; 2] = ["/vendor/etc/fstab.qcom", "/odm/etc/fstab.qcom"];
 
+static SAVED_TABLES: std::sync::OnceLock<Vec<Option<String>>> = std::sync::OnceLock::new();
+
+/// Retain configuration, without retaining filesystem descriptors or mounts.
+/// Live tables take precedence only while their partitions are mounted.
+pub fn preserve_tables() -> Result<()> {
+    let mut tables = Vec::new();
+    for file in FILES {
+        tables.push(read_table(file)?);
+    }
+    let _ = SAVED_TABLES.set(tables);
+    Ok(())
+}
+
+fn read_table(file: &str) -> Result<Option<String>> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP)
+            && !crate::mount::is_mount_point(
+                Path::new(file).ancestors().nth(2).expect("absolute fstab path"))? => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("read {file}")),
+    }
+}
+
 /// One filesystem the phone knows about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -54,18 +78,20 @@ pub fn entries(text: &str) -> Vec<Entry> {
 /// Every entry of the phone's own table, read from wherever the table is.
 fn table() -> Result<Vec<Entry>> {
     let mut out = Vec::new();
-    for file in FILES {
-        let text = match std::fs::read_to_string(file) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            // An unmounted odm can expose the ramdisk compatibility-link
-            // cycle through /vendor/odm. Do not hide loops on mounted data.
-            Err(e) if e.raw_os_error() == Some(libc::ELOOP)
-                && !crate::mount::is_mount_point(
-                    Path::new(file).ancestors().nth(2).expect("absolute fstab path"))? => continue,
-            Err(e) => return Err(e).with_context(|| format!("read {file}")),
-        };
-        out.extend(entries(&text));
+    for (index, file) in FILES.iter().enumerate() {
+        let saved = SAVED_TABLES.get().and_then(|tables| tables[index].as_deref());
+        // An unmounted vendor exposes a different ramdisk table, which may
+        // omit /data despite the installed table describing its encryption.
+        if let Some(text) = saved {
+            let at = Path::new(file).ancestors().nth(2).expect("absolute fstab path");
+            if !crate::mount::is_mount_point(at)? {
+                out.extend(entries(text));
+                continue;
+            }
+        }
+        let live = read_table(file)?;
+        let Some(text) = live.as_deref().or(saved) else { continue };
+        out.extend(entries(text));
     }
     Ok(out)
 }

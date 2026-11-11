@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::str::FromStr;
 

@@ -7,7 +7,7 @@ mod private_data;
 fn main() -> anyhow::Result<()> {
     use anyhow::{ensure, Context};
     use skyward_block::{dm, mount};
-    use std::fs::{self, File};
+    use std::fs;
     use std::path::PathBuf;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
@@ -17,6 +17,16 @@ fn main() -> anyhow::Result<()> {
     let slot = skyward_vab::current_slot()?.context("no booted slot")?;
     ensure!(skyward_vab::snapshot_state()? == skyward_vab::SnapshotState::None,
         "probe requires no pending snapshot");
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        ensure!(args.len() == 2 && args[0] == "--release-live"
+            && matches!(args[1].as_str(), "vendor" | "odm"), "expected --release-live vendor|odm");
+        let name = format!("{}{}", args[1], slot.suffix());
+        skyward_vab::unmount_one(slot, &args[1])?;
+        ensure!(dm::status(&name)?.is_none(), "{name} is still mapped");
+        println!("PASS: ordinary unmount and DM removal for {name}");
+        return Ok(());
+    }
     let source = format!("odm{}", slot.suffix());
     let lines = dm::table(&source)?;
     let mut targets = Vec::new();
@@ -61,10 +71,17 @@ fn main() -> anyhow::Result<()> {
         // against our temporary mount rather than either live mount.
         let base = point.strip_prefix("/")?.to_str().context("non-UTF8 probe path")?;
         ensure!(skyward_vab::mount_point(base) == point, "mount-point lookup failed");
-        // File::metadata uses fstat, avoiding the independently reproduced
-        // path-stat reference leak. Do not call path.is_dir() here.
-        ensure!(File::open(&point)?.metadata()?.is_dir(), "not a directory");
+        // Force SYS_fstat: newer Rust may implement File::metadata through
+        // fstatat(AT_EMPTY_PATH), which also leaks on the retained kernel.
         ensure!(mount::path_metadata(&point)?.is_dir(), "path metadata lost directory type");
+        ensure!(fs::metadata(&point)?.is_dir(), "path compatibility lost directory type");
+        ensure!(fs::File::open(&point)?.metadata()?.is_dir(), "descriptor compatibility lost directory type");
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let fd = fs::File::open(&point)?;
+        use std::os::fd::AsRawFd;
+        ensure!(unsafe { libc::fstatat(fd.as_raw_fd(), c"".as_ptr(), &mut st,
+            libc::AT_EMPTY_PATH | libc::AT_NO_AUTOMOUNT) } == 0, "empty-path compatibility failed");
+        drop(fd);
         // installed_props checks this path on every mount-page refresh.
         // Exercise that check on our independent view of the same odm.
         let properties = point.join("etc/build.prop");
@@ -73,6 +90,7 @@ fn main() -> anyhow::Result<()> {
                 ensure!(metadata.is_file(), "build.prop is not a file");
                 let mut props = std::collections::HashMap::new();
                 rsproperties::load_properties_from_file(&properties, None, "u:r:init:s0", &mut props)?;
+                let _ = fs::read_to_string(&properties)?;
                 println!("Parsed {} properties using the patched property parser", props.len());
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

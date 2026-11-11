@@ -51,8 +51,14 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
         {
             continue;
         }
-        if !Path::new(&s.path).is_file() {
+        if !crate::vendor_runtime::file(&s.path).is_file() {
             bail!("{} is missing; is its partition mounted?", s.path);
+        }
+        if crate::vendor_runtime::routes(&s.path) {
+            if let Some(pid) = running(&s.path) {
+                ensure!(crate::vendor_runtime::isolated(pid)?,
+                    "{} still uses an earlier vendor view; reboot into the bundled recovery", s.path);
+            }
         }
         let mut s = s.clone();
         if let Some(dir) = libraries {
@@ -259,7 +265,7 @@ fn command(s: &Service, who: &Credentials) -> io::Result<Command> {
     } else {
         None
     };
-    let mut cmd = Command::new(&s.path);
+    let mut cmd = crate::vendor_runtime::command(&s.path);
     cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if !s.libraries.is_empty() {
         cmd.env("LD_LIBRARY_PATH", s.libraries.join(":"));
@@ -285,7 +291,14 @@ pub fn pin(services: &[Service], mounted: &[Mounted]) -> Result<Vec<PathBuf>> {
     // A program run once has ended, and one between restarts has nothing in
     // memory to keep either.
     for s in services.iter().filter(|s| !s.oneshot) {
+        // These services map independent ramdisk copies. Looking up their
+        // /vendor map names here would instead pin the installed ROM's files.
         let Some(pid) = running(&s.path) else { continue };
+        if crate::vendor_runtime::routes(&s.path) {
+            ensure!(crate::vendor_runtime::isolated(pid)?,
+                "{} has not switched to the bundled vendor view", s.path);
+            continue;
+        }
         let process = Process::new(pid as i32).with_context(|| format!("open process {pid}"))?;
         for map in process.maps().with_context(|| format!("read the mappings of {}", s.path))? {
             if let MMapPath::Path(p) = map.pathname {
@@ -323,7 +336,11 @@ pub fn pin(services: &[Service], mounted: &[Mounted]) -> Result<Vec<PathBuf>> {
 /// and every other mount in that namespace in place.
 pub fn release_private_mounts(services: &[Service], points: &[PathBuf]) -> Result<()> {
     for s in services.iter().filter(|s| needs_private_data(s)) {
+        // The launcher already detached inherited super mounts and installed
+        // a private RAM /vendor. Do not detach that replacement.
         if let Some(pid) = running(&s.path) {
+            if crate::vendor_runtime::routes(&s.path)
+                && crate::vendor_runtime::isolated(pid)? { continue; }
             private_data::release_slot_mounts(pid, points)
                 .context("release inherited slot mounts in cnss namespace")?;
             let _ = skyward_sys::kmsg(&format!(
@@ -385,7 +402,9 @@ pub fn reachable() -> bool {
 pub fn running(path: &str) -> Option<u32> {
     fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
         let pid: u32 = e.file_name().to_str()?.parse().ok()?;
-        (fs::read_link(e.path().join("exe")).ok()? == Path::new(path)).then_some(pid)
+        let exe = fs::read_link(e.path().join("exe")).ok()?;
+        (exe == Path::new(path) || crate::vendor_runtime::routes(path)
+            && exe == crate::vendor_runtime::file(path)).then_some(pid)
     })
 }
 
