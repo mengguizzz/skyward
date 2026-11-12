@@ -3,6 +3,10 @@
 use super::*;
 use crate::icons::{self, Icon};
 
+// Confirmed from the tablet's saved settings while in the user's preferred
+// landscape orientation. Keep the original upright portrait as the other mode.
+const LANDSCAPE: u8 = 3;
+
 pub(super) struct Tablet {
     physical: (u32, u32),
     pub(super) enabled: bool,
@@ -18,6 +22,7 @@ pub(super) struct Tablet {
     home_hits: Vec<Hit>,
     home_height: u32,
     home_x: f32,
+    rotate_x: Option<f32>,
 }
 
 impl Tablet {
@@ -37,6 +42,7 @@ impl Tablet {
             home_hits: Vec::new(),
             home_height: 0,
             home_x: 0.0,
+            rotate_x: None,
         }
     }
 
@@ -61,10 +67,11 @@ impl App {
         if !self.tablet.enabled {
             return;
         }
-        let rotation = self.state.rotation.min(3);
+        let rotation = if matches!(self.state.rotation, 1 | 3) { LANDSCAPE } else { 0 };
+        self.state.rotation = rotation;
         let (width, height) = self.tablet.size(rotation);
         let header = (44.0 * self.px_per_dp).round() as u32;
-        let can_navigate = self.stack.iter().any(|s| s.0 == Screen::Home);
+        let can_navigate = !self.state.language_setup && self.stack.iter().any(|s| s.0 == Screen::Home);
         let sidebar = if width > height && can_navigate {
             (380.0 * self.px_per_dp).min(width as f32 * 0.38).round() as u32
         } else {
@@ -80,6 +87,7 @@ impl App {
             self.tablet.page = None;
             self.tablet.logical = None;
             self.tablet.home_hits.clear();
+            self.tablet.rotate_x = None;
             self.tablet.gesture = None;
             self.tablet.page_touch = false;
             self.tablet.toolbar_touch = false;
@@ -125,11 +133,11 @@ impl App {
         let mut header_theme = t;
         header_theme.m.w = width;
         header_theme.m.h = height;
-        widgets::status_bar(&mut logical, &header_theme, f, &self.bar(clock, info), t.pal.status);
-        let label = self.state.lang.pick(["旋转屏幕", "旋轉螢幕", "Rotate screen"]);
-        let center = width as f32 / 2.0;
-        logical.text(&f.body, label, center - 80.0 * d, 28.0 * d, 14.0 * d, t.pal.subtitle, Some(108.0 * d));
-        icons::glyph(&mut logical, Icon::Rotate, center + 60.0 * d, 22.0 * d, 24.0 * d, t.pal.accent);
+        let left = widgets::status_bar(&mut logical, &header_theme, f, &self.bar(clock, info), t.pal.status);
+        let rotate_x = left - 24.0 * d;
+        self.tablet.rotate_x = Some(rotate_x);
+        icons::glyph(&mut logical, Icon::Rotate, rotate_x,
+            t.m.status_cy, 20.0 * d, t.pal.accent);
         if ox > 0 {
             // Render the very same Home page, with live device state and its
             // original coloured tiles, rather than maintaining a second menu.
@@ -194,8 +202,9 @@ impl App {
         }
         let (ox, oy) = self.tablet.origin;
         let d = self.px_per_dp;
-        let (width, _) = self.tablet.size(self.tablet.rotation);
-        let rotate = |x: f32, y: f32| (x - width as f32 / 2.0).abs() <= 90.0 * d && y >= 0.0 && y < oy as f32;
+        let button_x = self.tablet.rotate_x;
+        let rotate = |x: f32, y: f32| button_x.is_some_and(|cx| (x - cx).abs() <= 22.0 * d)
+            && y >= 0.0 && y < oy as f32;
         match mapped {
             Touch::Down(x, y) => {
                 self.stir(now);
@@ -220,7 +229,7 @@ impl App {
             }
             Touch::Up => {
                 if std::mem::take(&mut self.tablet.toolbar_touch) {
-                    self.state.rotation = (self.state.rotation + 1) % 4;
+                    self.state.rotation = if self.state.rotation == 0 { LANDSCAPE } else { 0 };
                     self.tablet_layout();
                     let (rows, cols) = self.term_size(f);
                     if let Some(term) = &mut self.term {
@@ -337,7 +346,7 @@ mod tests {
         app.tablet_layout();
         assert_eq!((app.w, app.h), (1800, 2792));
         app.push(Screen::Mount);
-        app.state.rotation = 1;
+        app.state.rotation = LANDSCAPE;
         app.tablet_layout();
         assert_eq!((app.w, app.h), (2120, 1712));
         assert_eq!(app.screen(), Screen::Mount);
@@ -351,7 +360,7 @@ mod tests {
     #[test]
     fn phones_keep_the_existing_viewport() {
         let mut app = App::new(Screen::Home, 1080, 2400, 3.0);
-        app.state.rotation = 1;
+        app.state.rotation = LANDSCAPE;
         app.tablet_layout();
         assert_eq!((app.w, app.h), (1080, 2400));
         assert!(!app.tablet.enabled);
@@ -363,6 +372,17 @@ mod tests {
         app.state.rotation = 1;
         app.tablet_layout();
         assert_eq!(app.tablet.sidebar, 0);
+    }
+
+    #[test]
+    fn old_rotation_settings_map_to_the_two_supported_directions() {
+        for (saved, expected) in [(0, 0), (1, LANDSCAPE), (2, 0), (3, LANDSCAPE), (255, 0)] {
+            let mut app = App::new(Screen::Home, 1800, 2880, 2.5);
+            app.state.rotation = saved;
+            app.tablet_layout();
+            assert_eq!(app.state.rotation, expected);
+            assert_eq!(app.tablet.rotation, expected);
+        }
     }
 
     #[test]
@@ -408,7 +428,7 @@ mod tests {
         app.compose(&mut out, &f, &info, "12:00", 1100);
         let x = hit.x + hit.w / 2.0;
         let y = app.tablet.origin.1 as f32 + hit.y + hit.h / 2.0 - app.tablet.scroll;
-        app.touch(Touch::Down(y, 2879.0 - x), &f, 1200);
+        app.touch(Touch::Down(1799.0 - y, x), &f, 1200);
         app.touch(Touch::Up, &f, 1250);
         assert_eq!(app.screen(), Screen::Settings);
         app.act(Action::Open(Screen::Language), 1300);
@@ -422,16 +442,23 @@ mod tests {
             .crop(0, app.tablet.origin.1, app.tablet.sidebar, app.h);
         assert!(nav.data.chunks_exact(4).any(|p| p[1] > 140 && p[0] < 80 && p[2] < 120),
             "Home must retain its coloured install icon");
+        let button_x = app.tablet.rotate_x.expect("composition positions the rotation icon");
+        let button_y = app.theme().m.status_cy;
+        app.touch(Touch::Down(1799.0 - button_y, button_x), &f, 1700);
+        app.touch(Touch::Up, &f, 1750);
+        assert_eq!(app.state.rotation, 0);
+        assert_eq!(app.screen(), Screen::Settings);
     }
 
     #[test]
-    fn rotation_button_is_reachable_in_each_orientation_and_cancels_confirmation() {
+    fn rotation_button_toggles_only_portrait_and_preferred_landscape() {
         let f = crate::font::bundled();
         let mut app = App::new(Screen::Home, 1800, 2880, 2.5);
-        for r in 0..4 {
+        for r in [0, LANDSCAPE, 0, LANDSCAPE] {
             app.tablet_layout();
             let (width, _) = app.tablet.size(r);
-            let (x, y) = (width as f32 / 2.0, 55.0);
+            let (x, y) = (width as f32 - 60.0, 55.0);
+            app.tablet.rotate_x = Some(x);
             let (px, py) = match r {
                 1 => (y, 2879.0 - x),
                 2 => (1799.0 - x, 2879.0 - y),
@@ -441,7 +468,7 @@ mod tests {
             app.state.confirm = 0.8;
             assert!(app.touch(Touch::Down(px, py), &f, 1000).is_empty());
             assert!(app.touch(Touch::Up, &f, 1050).is_empty());
-            assert_eq!(app.state.rotation, (r + 1) % 4);
+            assert_eq!(app.state.rotation, if r == 0 { LANDSCAPE } else { 0 });
             assert_eq!(app.state.confirm, 0.0);
             assert_eq!(app.screen(), Screen::Home);
         }
@@ -455,7 +482,8 @@ mod tests {
         app.tablet_layout();
         let before = app.term_size(&f);
         app.term_started(before.0, before.1);
-        app.touch(Touch::Down(900.0, 55.0), &f, 1000);
+        app.tablet.rotate_x = Some(1740.0);
+        app.touch(Touch::Down(1740.0, 55.0), &f, 1000);
         let effects = app.touch(Touch::Up, &f, 1050);
         let (rows, cols) = app.term_size(&f);
         assert_ne!(before, (rows, cols));

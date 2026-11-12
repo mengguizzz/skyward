@@ -3468,7 +3468,11 @@ pub fn language(cx: &Ctx) -> Frame {
     let rows: Vec<Row> = Lang::ALL.iter().map(|&k| Row::new(k.name()).trail(Trail::Check(k == l))).collect();
     let list = widgets::list(&mut c, t, f, top, &rows);
     let out = hits(&list.rows, &Lang::ALL.map(Action::Language));
-    Frame::new(t, c, out, l.pick(LANGUAGE), top)
+    let setup = cx.state.language_setup;
+    Frame {
+        back: !setup,
+        ..Frame::new(t, c, out, if setup { "语言 / Language" } else { l.pick(LANGUAGE) }, top)
+    }
 }
 
 /// The time zone the status bar's clock and the times on the pages keep.

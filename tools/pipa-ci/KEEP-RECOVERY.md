@@ -13,6 +13,14 @@ The switch applies to successful payload OTA and script ZIP installs. Direct
 partition-image writes do not run this backend. The cust self-installer keeps
 its existing independent path and does not invoke nested retention.
 
+Self-updates are identified by `META-INF/com/skyward/pipa-cust-update`.
+The packer always writes the exact LF declaration required by older recoveries,
+regardless of Windows checkout settings. New recovery builds also accept CRLF.
+Without this distinction, a successful self-update could be followed by an
+unnecessary retention attempt using the old running recovery's RAM installer.
+Its cust-version check would correctly refuse the now different payload; that
+failure does not mean the self-update failed or the new boot was overwritten.
+
 The build first generates a complete seed installer whose overlay has no
 embedded installer. It then builds the final boot and outer installer with that
 seed ZIP and its digest at `/skyward/reinstall/`. Both use the same compiled

@@ -1608,7 +1608,7 @@ fn tablet_previews(root: &Path, out: &Path, fonts: &Fonts) -> Result<()> {
     let (w, h) = (cfg.display.width, cfg.display.height);
     let d = cfg.display.density as f32 / 160.0;
     for dark in [false, true] {
-        for rotation in 0..4 {
+        for rotation in [0, 3] {
             let mut app = App::new(Screen::Home, w, h, d);
             app.state.lang = lang();
             app.state.dark = dark;
@@ -1655,6 +1655,23 @@ fn tablet_previews(root: &Path, out: &Path, fonts: &Fonts) -> Result<()> {
             write_png(&path, &upright)?;
             println!("wrote {}", path.display());
         }
+        let mut first = App::new(Screen::Decrypt, w, h, d);
+        first.state.dark = dark;
+        first.take_settings(None, Some(Lang::Hans));
+        first.offer_first_language();
+        let mut canvas = Canvas::new(w, h);
+        first.compose(&mut canvas, fonts, &info, CLOCK, 1000);
+        anyhow::ensure!(first.screen() == Screen::Language, "first start must offer languages");
+        let mode = if dark { "dark" } else { "light" };
+        let path = out.join(format!("pipa-first-language-{mode}.png"));
+        write_png(&path, &canvas)?;
+        let hit = first.frame(fonts, &info).hits.iter()
+            .find(|hit| hit.action == Action::Language(Lang::En)).unwrap().rect;
+        first.touch(Touch::Down(hit.x + hit.w / 2.0, 44.0 * d + hit.y + hit.h / 2.0), fonts, 1100);
+        let effects = first.touch(Touch::Up, fonts, 1150);
+        anyhow::ensure!(first.screen() == Screen::Decrypt && first.state.lang == Lang::En
+            && !effects.is_empty(), "language selection must resume unlock in English");
+        println!("wrote {}; first-language touch verified", path.display());
     }
     Ok(())
 }

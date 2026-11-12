@@ -15,8 +15,12 @@ Phones keep their existing viewport and touch handling.
 - A single status bar spans the whole display above both
   columns. Detail pages do not draw their own status bar.
 - The Home pane and detail page scroll independently.
-- The rotation control in the centre of the status band cycles through four
-  clockwise quarter turns. There is no additional app toolbar above the panes.
+- A 20 dp icon to the left of the right-hand status readings toggles between the original
+  portrait (rotation 0) and the user's confirmed landscape (rotation 3).
+  Its touch target remains 44 x 44 dp. Its position follows the actual left edge
+  of the readings, including changes in battery, network and temperature.
+  There is no text label or additional app toolbar above the panes.
+- Legacy rotation 1 becomes 3, and rotation 2 becomes 0.
 - The `rotation` setting is saved through the existing settings keeper.
 - Rotation is manual. Automatic rotation using the accelerometer is not
   implemented; this does not start the vendor sensor service.
@@ -30,6 +34,13 @@ Phones keep their existing viewport and touch handling.
   restrictions on leaving active writes and unsaved editors remain in effect.
 
 ## Source
+
+On pipa's first interactive menu start without a saved explicit language,
+the existing language page is shown before unlock/Home. Its bilingual heading
+and native language names offer Simplified Chinese, Traditional Chinese and
+English. A selection continues to the original start page and uses the normal
+settings keeper. Existing choices skip setup, and automated recovery requests
+and fastbootd are not intercepted. During setup the Home sidebar is hidden.
 
 - `crates/skyward-ui/src/tablet.rs`: shell layout, rendering, transformed touches,
   independent navigation scrolling, and guarded navigation.
@@ -50,7 +61,7 @@ cargo run --locked -p skyward-preview -- OUTPUT_DIR --tablet
 ```
 
 The preview uses pipa's actual 1800 x 2880 panel and 400 dpi configuration.
-It renders all four orientations in both themes. Landscape previews navigate
+It renders both supported orientations in both themes. Landscape previews navigate
 through the real Home device card using physical panel coordinates and assert
 that the About page opens on the right.
 PNG files are exported upright for inspection.

@@ -1100,6 +1100,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let locale = request.locale.as_deref().or(info.locale.as_deref());
     let named = locale.map(Lang::for_locale).transpose()?;
     app.take_settings(kept.settings(), named);
+    if cfg.device.codename == "pipa" && matches!(&request.work, Work::Menu | Work::Exit) {
+        app.offer_first_language();
+    }
     let mut keeper = Keeper::new(&kept);
     skyward_sys::kmsg(&format!(
         "the pages speak {:?}, {}, and the locale named is {}",

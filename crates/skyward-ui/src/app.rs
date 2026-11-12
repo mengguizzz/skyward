@@ -1585,6 +1585,8 @@ pub struct State {
     /// The language was chosen on the language page, now or at an earlier
     /// start, where otherwise it is the one the system names.
     pub language_chosen: bool,
+    /// The first interactive start is waiting for an explicit language choice.
+    pub language_setup: bool,
     pub dark: bool,
     pub brightness: f32,
     /// How long the screen stays on with nothing touched, by its place in
@@ -1766,6 +1768,7 @@ impl Default for State {
             rotation: 0,
             lang: Lang::Hans,
             language_chosen: false,
+            language_setup: false,
             dark: false,
             brightness: SLIDER_START,
             // Two minutes.
@@ -3274,6 +3277,17 @@ impl App {
             }
         }
         self.refresh();
+    }
+
+    /// Show the existing language picker before the normal interactive start.
+    /// Automated recovery requests must not call this entry point.
+    pub fn offer_first_language(&mut self) {
+        if !self.state.language_chosen && !self.state.language_setup
+            && matches!(self.screen(), Screen::Home | Screen::Decrypt)
+        {
+            self.state.language_setup = true;
+            self.push(Screen::Language);
+        }
     }
 
     /// The page's readings changed (battery, storage): render it again.
@@ -4814,6 +4828,9 @@ impl App {
     /// and in a place, until it reaches the place's top.
     fn back(&mut self, now: u64) -> Vec<Effect> {
         let (l, mut fx) = (self.state.lang, Vec::new());
+        if self.state.language_setup && self.screen() == Screen::Language {
+            return fx;
+        }
         if self.stack.len() <= 1 {
             return fx;
         }
@@ -5391,6 +5408,14 @@ impl App {
             Action::Language(l) => {
                 self.state.lang = l;
                 self.state.language_chosen = true;
+                if self.state.language_setup {
+                    self.state.language_setup = false;
+                    self.end_turn();
+                    self.stack.pop();
+                    self.settle_page();
+                    self.refresh();
+                    return self.arrive();
+                }
                 self.refresh();
             }
             Action::BackupPart(k) => {
@@ -8466,6 +8491,47 @@ mod tests {
         assert_eq!(app.deadline(1000), Some(TOAST_MS));
         app.tick(TOAST_MS);
         assert_eq!(app.deadline(TOAST_MS), app.idle_due());
+    }
+
+    #[test]
+    fn first_language_choice_precedes_unlock_and_is_kept() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.take_settings(None, Some(Lang::Hans));
+        app.offer_first_language();
+        assert_eq!(app.screen(), Screen::Language);
+        assert!(app.arrive().is_empty(), "unlock must wait for the language choice");
+        assert!(!app.frame(&f, &i).back);
+        assert_eq!(app.frame(&f, &i).title, "语言 / Language");
+        assert!(app.back(0).is_empty());
+        assert_eq!(app.screen(), Screen::Language);
+        let effects = app.act(Action::Language(Lang::En), 1000);
+        assert_eq!(app.screen(), Screen::Decrypt);
+        assert!(!effects.is_empty(), "continue the normal unlock entry effects");
+        assert!(!app.state.language_setup);
+        let kept = app.settings();
+        assert_eq!(kept.language.as_deref(), Some("en"));
+        let mut next = App::new(Screen::Decrypt, W, H, PPD);
+        next.take_settings(Some(&kept), Some(Lang::Hans));
+        next.offer_first_language();
+        assert_eq!(next.screen(), Screen::Decrypt);
+        assert_eq!(next.state.lang, Lang::En);
+    }
+
+    #[test]
+    fn first_language_choice_is_idempotent_and_does_not_replace_service_screens() {
+        let mut home = App::new(Screen::Home, W, H, PPD);
+        home.offer_first_language();
+        home.offer_first_language();
+        assert_eq!(home.stack.len(), 2);
+        home.act(Action::Language(Lang::Hant), 0);
+        assert_eq!(home.screen(), Screen::Home);
+        for screen in [Screen::Fastboot, Screen::CantStart, Screen::Unhandled] {
+            let mut app = App::new(screen, W, H, PPD);
+            app.offer_first_language();
+            assert_eq!(app.screen(), screen);
+            assert!(!app.state.language_setup);
+        }
     }
 
     #[test]

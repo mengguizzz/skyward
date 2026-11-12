@@ -41,6 +41,10 @@ def package(base, routing, target, out):
     if stage.exists():
         raise SystemExit("installer-staging already exists; use a fresh output directory")
     shutil.copytree(REPO / "tools/pipa-cust-installer/package", stage)
+    # Older recovery builds require this exact LF declaration. Windows
+    # checkout settings must not turn a self-update into an ordinary script.
+    declaration = "META-INF/com/skyward/pipa-cust-update"
+    (stage / declaration).write_bytes(b"pipa-cust-update-v1\n")
     (stage / "data").mkdir()
     (stage / "tools").mkdir()
     (stage / "payload").mkdir()
@@ -71,6 +75,8 @@ def package(base, routing, target, out):
     with zipfile.ZipFile(result) as archive:
         if archive.testzip() is not None:
             raise SystemExit("Installer ZIP verification failed")
+        if archive.read(declaration) != b"pipa-cust-update-v1\n":
+            raise SystemExit("Installer self-update declaration is not canonical")
         for line in lines:
             expected, name = line.split("  ", 1)
             if hashlib.sha256(archive.read(name)).hexdigest() != expected:

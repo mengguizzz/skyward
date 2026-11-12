@@ -230,7 +230,8 @@ pub const LOW_BATTERY: u8 = 20;
 /// slot in a tag as the stock bar tags a VPN, and the battery's temperature
 /// in figures over their unit as the stock bar gives a speed. `ink` colours
 /// the clock and every mark but the battery.
-pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar, ink: Rgba) {
+/// Returns the left edge of the right-hand status readings.
+pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar, ink: Rgba) -> f32 {
     let m = &t.m;
     let cy = m.status_cy;
     // Digits carry no descender, so centre on half their height (≈0.72 em).
@@ -269,8 +270,9 @@ pub fn status_bar(c: &mut Canvas, t: &Theme, f: &Fonts, bar: &Bar, ink: Rgba) {
         left = speed(c, t, f, &fmt::degrees(tenths), "°C", left - gap, cy, ink);
     }
     if let Some(w) = &bar.wlan {
-        speed(c, t, f, &w.speed, w.unit, left - gap, cy, ink);
+        left = speed(c, t, f, &w.speed, w.unit, left - gap, cy, ink);
     }
+    left
 }
 
 /// Room between the marks on the bar's right, as the stock bar leaves it

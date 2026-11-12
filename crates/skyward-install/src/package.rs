@@ -23,12 +23,12 @@ const PIPA_CUST_UPDATE: &str = "META-INF/com/skyward/pipa-cust-update";
 pub fn pipa_cust_update<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<bool> {
     let Some(index) = zip.index_for_name(PIPA_CUST_UPDATE) else { return Ok(false) };
     let mut entry = zip.by_index(index).context("open the pipa cust update declaration")?;
-    if entry.size() != b"pipa-cust-update-v1\n".len() as u64 {
+    if !matches!(entry.size(), 20 | 21) {
         return Ok(false);
     }
     let mut declaration = String::new();
     entry.read_to_string(&mut declaration).context("read the pipa cust update declaration")?;
-    Ok(declaration == "pipa-cust-update-v1\n")
+    Ok(matches!(declaration.as_str(), "pipa-cust-update-v1\n" | "pipa-cust-update-v1\r\n"))
 }
 
 /// The most read to tell an image's kind: every header this recovery
@@ -251,7 +251,9 @@ METADATA_SIZE=1024
     fn only_the_exact_cust_update_declaration_keeps_system_mounts() {
         for (value, expected) in [
             (b"pipa-cust-update-v1\n".as_slice(), true),
+            (b"pipa-cust-update-v1\r\n".as_slice(), true),
             (b"pipa-cust-update-v2\n".as_slice(), false),
+            (b"pipa-cust-update-v1".as_slice(), false),
             (b"pipa-cust-update-v1\nextra".as_slice(), false),
             (b"".as_slice(), false),
         ] {
