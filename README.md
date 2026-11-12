@@ -1,6 +1,6 @@
 ![Skyward Recovery](assets/hero.jpg)
 
-# Skyward
+# Skyward for Xiaomi Pad 6 (pipa)
 
 English | [简体中文](README.zh-CN.md)
 
