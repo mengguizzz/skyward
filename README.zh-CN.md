@@ -1,6 +1,6 @@
 ![Skyward Recovery](assets/hero.jpg)
 
-# Skyward
+# Skyward for 小米平板6
 
 [English](README.md) | 简体中文
 
