@@ -10,10 +10,10 @@ os_version_prop = "ro.mi.os.version.incremental"
 [display]
 width = 1800
 height = 2880
-density = 400
+density = 390
 diagonal = 11.0
 normal_max_brightness = 2047
-max_refresh_hz = 120
+max_refresh_hz = 144
 disable_blanking = true
 reset_on_open = false
 
