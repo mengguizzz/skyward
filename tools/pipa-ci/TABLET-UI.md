@@ -69,3 +69,13 @@ PNG files are exported upright for inspection.
 Before calling a release hardware-tested, check rotation in both landscape
 directions, sidebar and page scrolling, password keyboard, swipe confirmations,
 screen off/on, terminal resizing, and settings persistence on the tablet.
+
+## First-language device verification
+
+On 2026-11-12, the language setup was verified on pipa after clearing only the
+explicit `language` setting to simulate a first interactive start. The picker
+appeared and the user selected English. The device then saved both `language`
+and `spoken` as `en`, while retaining rotation 3 and the other settings.
+The metadata filesystem was read-only again after the selection was saved.
+This verifies the setup and save path; persistence across another recovery
+restart was not separately retested in this check.
