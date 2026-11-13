@@ -43,6 +43,8 @@ mod wipe;
 mod wlan;
 #[cfg(target_os = "android")]
 mod vendor_runtime;
+#[cfg(any(target_os = "android", test))]
+mod pipa_keymaster;
 
 #[derive(Parser)]
 #[command(name = "skyward", version, about = "Skyward recovery")]
@@ -509,7 +511,7 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     if vendor_runtime::enabled() && !BUILD_VERSION.iter().all(|name| props.contains_key(*name)) {
         skyward_sys::kmsg("bundled vendor runtime: installed version unavailable; decryption compatibility is not assumed")?;
     } else {
-        adopt_installed_version(&props)?;
+        adopt_installed_version(&cfg.device.codename, &props)?;
     }
     // Without logd the phone's own programs still run, and only what they
     // log is lost, so why it did not start goes to the kernel log.
@@ -700,17 +702,25 @@ fn mount_firmware(firmware: &skyward_config::FirmwarePartition) -> Result<()> {
 #[cfg(target_os = "android")]
 const BUILD_VERSION: [&str; 3] = ["ro.build.version.release", "ro.build.version.security_patch", "ro.vendor.build.security_patch"];
 
-/// Set each of [`BUILD_VERSION`] to the installed system's value. An earlier
-/// run of the recovery service may have set it already, and init sets such
-/// a property only once.
+/// Adopt the installed build, with the narrow pipa TWRP compatibility profile.
+/// An earlier recovery run may have set these already; init sets them once.
 #[cfg(target_os = "android")]
-fn adopt_installed_version(props: &std::collections::HashMap<String, String>) -> Result<()> {
+fn adopt_installed_version(codename: &str, props: &std::collections::HashMap<String, String>) -> Result<()> {
     for name in BUILD_VERSION {
-        let value = props.get(name).with_context(|| format!("the installed system says no {name}"))?;
-        if skyward_sys::prop(name).as_ref() != Some(value) {
+        let installed = props.get(name).with_context(|| format!("the installed system says no {name}"))?;
+        let override_patch = (name == "ro.vendor.build.security_patch")
+            .then(|| pipa_keymaster::vendor_patch(codename, props)).flatten();
+        let value = override_patch.unwrap_or(installed.as_str());
+        if skyward_sys::prop(name).as_deref() != Some(value) {
             skyward_sys::set_prop(name, value)?;
         }
-        skyward_sys::kmsg(&format!("{name} is the installed system's {value}"))?;
+        if override_patch.is_some() {
+            skyward_sys::kmsg(&format!(
+                "pipa ColorOS beta7.1 TWRP compatibility: {name}={value}, installed={installed}; experimental"
+            ))?;
+        } else {
+            skyward_sys::kmsg(&format!("{name} is the installed system's {value}"))?;
+        }
     }
     Ok(())
 }

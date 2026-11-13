@@ -136,6 +136,14 @@ fn gcm_params(call: &mut Parcel, app_id: &[u8], nonce: &[u8]) {
     parameter(call, TAG_NONCE, Value::Blob(nonce));
 }
 
+/// Upgrading a blob needs its application binding, not operation parameters.
+fn upgrade_params(call: &mut Parcel, app_id: &[u8]) {
+    call.i32(i32::from(!app_id.is_empty()));
+    if !app_id.is_empty() {
+        parameter(call, TAG_APPLICATION_ID, Value::Blob(app_id));
+    }
+}
+
 /// The phone's key service, as this program talks to it.
 #[cfg(target_os = "android")]
 pub struct KeyMint<'a> {
@@ -253,7 +261,7 @@ impl<'a> KeyMint<'a> {
                 // now; the one on disk is left as it is, so nothing of the
                 // phone's own is changed by reading it here.
                 let renewed = self
-                    .upgrade(key_blob, |call| gcm_params(call, app_id, nonce))
+                    .upgrade(key_blob, |call| upgrade_params(call, app_id))
                     .context("renew the key for the firmware running now")?;
                 self.begin(&renewed, app_id, nonce, note)?
             }
@@ -353,6 +361,25 @@ impl<'a> KeyMint<'a> {
 mod tests {
     use super::*;
     use skyward_binder::parcel::Reader;
+
+    #[test]
+    fn upgrade_only_carries_the_application_binding() {
+        for app_id in [&[][..], &[9, 8][..]] {
+            let mut parcel = Parcel::default();
+            upgrade_params(&mut parcel, app_id);
+            let mut read = Reader::new(parcel.bytes());
+            assert_eq!(read.i32().unwrap(), i32::from(!app_id.is_empty()));
+            if !app_id.is_empty() {
+                let end = read.structure().unwrap();
+                assert_eq!(read.i32().unwrap(), TAG_APPLICATION_ID);
+                assert_eq!(read.i32().unwrap(), 1);
+                assert_eq!(read.i32().unwrap(), VALUE_BLOB);
+                assert_eq!(read.blob().unwrap(), app_id);
+                read.go(end).unwrap();
+            }
+            assert_eq!(read.here(), parcel.bytes().len());
+        }
+    }
 
     #[test]
     fn gcm_begin_parameters_do_not_repeat_the_separate_purpose_argument() {

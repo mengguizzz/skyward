@@ -23,7 +23,7 @@ cust=/dev/block/bootdevice/by-name/cust
 [ "$(blockdev --getsize64 "$boot")" = 201326592 ] || fail "Unexpected boot size"
 [ "$(blockdev --getsize64 "$cust")" = 1073741824 ] || fail "Unexpected cust size"
 sha256sum -c SHA256SUMS >"$here/package-verification.log" || fail "Package integrity check failed"
-ui "Skyward pipa cust installer v8"
+ui "Skyward pipa cust installer v9"
 ui "Target: boot$slot only; kernel retained; cust contents preserved"
 work="$(mktemp -d /tmp/skyward-patch.XXXXXX)"
 cust_mount="$work/cust"
@@ -32,25 +32,12 @@ mounted=0
 boot_touched=0
 cust_touched=0
 committed=0
-backup=
+rollback=
 prior_cust_ro=0
 using_existing_cust=0
 cust_mount_rw=0
 had_skyward=0
 existing_cust_mount=
-publish_backup() {
-    case "$mode" in --retain*) return 0 ;; esac
-    [ -n "$backup" ] && [ -d "$backup" ] || return 0
-    case "$backup" in /data/media/0/Skyward-backups/*) ;; *) return 1 ;; esac
-    [ "$(readlink -f "$backup")" = "$backup" ] || return 1
-    chown 1023:1023 /data/media/0/Skyward-backups || return 1
-    chmod 2770 /data/media/0/Skyward-backups || return 1
-    find "$backup" -type d -exec chown 1023:1023 {} + || return 1
-    find "$backup" -type d -exec chmod 2770 {} + || return 1
-    find "$backup" -type f -exec chown 1023:1023 {} + || return 1
-    find "$backup" -type f -exec chmod 660 {} + || return 1
-    if [ -f "$backup/restore.sh" ]; then chmod 770 "$backup/restore.sh" || return 1; fi
-}
 make_cust_writable() {
     if [ "$using_existing_cust" = 1 ]; then
         mount -o remount,rw "$cust_mount" || return 1
@@ -68,7 +55,7 @@ remove_new_payload() {
     make_cust_writable || return 1
     clear_skyward || return 1
     if [ "$had_skyward" = 1 ]; then
-        tar -xpf "$backup/skyward-files.tar" -C "$cust_mount" || return 1
+        tar -xpf "$rollback/skyward-files.tar" -C "$cust_mount" || return 1
     fi
     sync
 }
@@ -83,10 +70,10 @@ finish() {
     result=$?
     rollback_failed=0
     trap - EXIT
-    if [ "$committed" = 0 ] && [ -n "$backup" ]; then
+    if [ "$committed" = 0 ] && [ -n "$rollback" ]; then
         if [ "$boot_touched" = 1 ]; then
             ui "Restoring original boot after failure..."
-            dd if="$backup/boot.img" of="$boot" bs=1048576 conv=fsync ||
+            dd if="$rollback/boot.img" of="$boot" bs=1048576 conv=fsync ||
                 { result=1; rollback_failed=1; }
             [ "$(sha256sum "$boot" | cut -d ' ' -f1)" = "$boot_hash" ] ||
                 { result=1; rollback_failed=1; }
@@ -94,8 +81,9 @@ finish() {
         if [ "$cust_touched" = 1 ]; then
             ui "Restoring the previous Skyward directory after failure..."
             if ! remove_new_payload; then
-                ui "ERROR: payload cleanup failed; full cust backup retained in $backup"
+                ui "ERROR: payload rollback failed; RAM recovery files retained at $rollback"
                 result=1
+                rollback_failed=1
             fi
         fi
     fi
@@ -105,11 +93,8 @@ finish() {
     if [ "$mounted" = 1 ]; then
         umount "$cust_mount" || result=1
     fi
-    if ! publish_backup; then
-        ui "WARNING: backup permissions could not be normalized: $backup"
-    fi
     if [ "$rollback_failed" = 1 ]; then
-        ui "ERROR: boot rollback failed; RAM backup retained at $backup/boot.img"
+        ui "ERROR: rollback incomplete; RAM recovery files retained at $rollback until reboot"
     else
         rm -rf "$work"
     fi
@@ -170,42 +155,27 @@ case "$mode" in --retain*)
     patched_hash="$(sha256sum "$work/patched.img" | cut -d ' ' -f1)"
     if [ "$boot_hash" != "$patched_hash" ]; then
         # Preserve the post-ROM boot in RAM so a failed write can be rolled back.
-        backup="$work/rollback"
-        mkdir "$backup"
-        cp "$work/original.img" "$backup/boot.img"
+        rollback="$work/rollback"
+        mkdir -m 700 "$rollback"
+        ln "$work/original.img" "$rollback/boot.img"
         boot_touched=1
         dd if="$work/patched.img" of="$boot" bs=1048576 conv=fsync status=none
         [ "$(sha256sum "$boot" | cut -d ' ' -f1)" = "$patched_hash" ] ||
             fail "Boot readback mismatch"
     fi
     committed=1
-    # RAM rollback files are private and must not be published into Android data.
-    backup=
     ui "Recovery route retained in boot$slot; cust unchanged. No automatic reboot."
     exit 0
     ;;
 esac
-[ -d /data/media/0 ] && [ -w /data/media/0 ] || fail "Decrypt/mount data in recovery first"
-available="$(df -Pk /data/media/0 | tail -n 1 | awk '{print $4}')"
-case "$available" in ''|*[!0-9]*) fail "Cannot read data free space" ;; esac
-[ "$available" -ge 1400000 ] || fail "At least 1.4 GB free data space is required for backups"
-backup="/data/media/0/Skyward-backups/$(date +%Y%m%d-%H%M%S)-slot${slot}-$$"
-mkdir -p "$backup"
-publish_backup || fail "Cannot prepare backup directory permissions"
-cp "$work/original.img" "$backup/boot.img"
-ui "Backing up the complete cust partition; please wait..."
-dd if="$cust" of="$backup/cust.img" bs=1048576 conv=fsync status=none
-[ "$(wc -c <"$backup/boot.img")" = 201326592 ] || fail "Boot backup truncated"
-[ "$(wc -c <"$backup/cust.img")" = 1073741824 ] || fail "cust backup truncated"
+ui "NOTICE: No persistent backup is created. Save important data and images manually if needed."
+ui "Installation does not require data decryption; temporary rollback files use RAM only."
+rollback="$work/rollback"
+mkdir -m 700 "$rollback"
+# Reuse the original boot already read for patching without another RAM copy.
+ln "$work/original.img" "$rollback/boot.img"
+[ "$(wc -c <"$rollback/boot.img")" = 201326592 ] || fail "Original boot read truncated"
 boot_hash="$(sha256sum "$work/original.img" | cut -d ' ' -f1)"
-cust_hash="$(sha256sum "$cust" | cut -d ' ' -f1)"
-[ "$(sha256sum "$backup/boot.img" | cut -d ' ' -f1)" = "$boot_hash" ] || fail "Boot backup mismatch"
-[ "$(sha256sum "$backup/cust.img" | cut -d ' ' -f1)" = "$cust_hash" ] || fail "cust backup mismatch"
-printf '%s  boot.img\n%s  cust.img\n' "$boot_hash" "$cust_hash" >"$backup/SHA256SUMS"
-printf 'device=pipa\nslot=%s\nboot=%s\ncust=%s\n' "$slot" "$boot" "$cust" >"$backup/device.txt"
-cp "$here/restore.sh" "$backup/restore.sh"
-cp "$work/patch.log" "$backup/patch.log"
-sync
 if [ "$prior_cust_ro" = 1 ]; then
     cust_mount="$existing_cust_mount"
     using_existing_cust=1
@@ -219,9 +189,9 @@ find "$cust_mount" -path "$cust_mount/skyward" -prune -o -type f -exec sha256sum
 if [ -e "$cust_mount/skyward" ]; then
     [ -d "$cust_mount/skyward" ] && [ ! -L "$cust_mount/skyward" ] ||
         fail "Skyward namespace is not a normal directory"
-    ui "Backing up the existing Skyward directory before replacement..."
-    tar -cpf "$backup/skyward-files.tar" -C "$cust_mount" skyward
-    tar -tf "$backup/skyward-files.tar" >"$backup/skyward-files-list.txt"
+    ui "Preparing temporary rollback for the existing Skyward directory..."
+    tar -cpf "$rollback/skyward-files.tar" -C "$cust_mount" skyward
+    tar -tf "$rollback/skyward-files.tar" >"$work/skyward-files-list.txt"
     had_skyward=1
 fi
 "$here/tools/recovery-loader" --verify "$here/payload"
@@ -238,7 +208,7 @@ chmod 755 "$cust_mount/skyward" "$cust_mount/skyward/.prototype-v1-installing"
 chmod 644 "$cust_mount/skyward/.prototype-v1-installing/"*
 "$here/tools/recovery-loader" --verify "$cust_mount/skyward/.prototype-v1-installing"
 mv "$cust_mount/skyward/.prototype-v1-installing" "$cust_mount/skyward/prototype-v1"
-sha256sum -c "$work/cust-files.sha256" >"$backup/cust-files-check.log" || fail "Existing cust files changed"
+sha256sum -c "$work/cust-files.sha256" >"$work/cust-files-check.log" || fail "Existing cust files changed"
 sync
 if [ "$using_existing_cust" = 1 ]; then
     if [ "$cust_mount_rw" = 1 ]; then
@@ -258,9 +228,8 @@ else
     dd if="$work/patched.img" of="$boot" bs=1048576 conv=fsync status=none
 fi
 [ "$(sha256sum "$boot" | cut -d ' ' -f1)" = "$patched_hash" ] || fail "Boot readback mismatch"
-printf '%s\n' "$patched_hash" >"$backup/installed-boot.sha256"
 sync
 committed=1
 ui "Installation complete. No automatic reboot."
-ui "Backups: $backup"
+ui "No persistent backup created; temporary rollback files are cleared."
 ui "Normal boot uses Android; recovery loads Skyward from cust."

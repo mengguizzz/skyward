@@ -10,6 +10,7 @@ mkdir -p "$2"
 out="$(realpath "$2")"
 cd "$repo"
 python3 tools/pipa-ci/package.py validate "$base"
+python3 tools/pipa-ci/test_installer_no_data.py
 : "${ANDROID_NDK_HOME:?Set ANDROID_NDK_HOME to Linux Android NDK r29}"
 ndk="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ndk/aarch64-linux-android30-clang"
